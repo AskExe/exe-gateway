@@ -1,0 +1,33 @@
+{
+  "name": "@askexenow/exe-gateway",
+  "version": "0.2.0",
+  "description": "exe-os Gateway — webhook server, messaging adapters, bot registry",
+  "type": "module",
+  "main": "dist/gateway.js",
+  "bin": {
+    "exe-gateway": "dist/bin/exe-gateway.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/bin/exe-gateway.ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@askexenow/exe-os": "^0.8.41"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AskExe/exe-gateway.git"
+  },
+  "private": true,
+  "license": "UNLICENSED"
+}
