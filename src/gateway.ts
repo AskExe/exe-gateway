@@ -59,6 +59,13 @@ export class Gateway {
   private customerStore?: CustomerStore;
   private startedAt = 0;
 
+  // Auto-reply safety: track who we've replied to and how many total
+  private autoReplyLog = new Map<string, number>(); // senderId → last reply timestamp
+  private autoReplyCount = 0;
+  private static readonly AUTO_REPLY_COOLDOWN_MS = 86_400_000; // 1 reply per contact per 24h
+  private static readonly AUTO_REPLY_DAILY_CAP = 20; // max 20 auto-replies per day total
+  private static readonly AUTO_REPLY_ENABLED = false; // DISABLED by default — opt-in via config
+
   constructor(options: GatewayOptions) {
     this.config = options.config;
     this.platformConfigs = options.platformConfigs;
@@ -170,22 +177,26 @@ export class Gateway {
     // 4. Bot registry lookup
     const bot = this.botRegistry.get(route.employee);
     if (!bot) {
-      // No bot configured — send "Received." with random human-like delay
-      const adapter = this.resolveAdapter(msg);
-      if (adapter) {
-        const delaySec = 3 + Math.random() * 12; // 3-15 seconds random
-        console.log(`[gateway] No bot for ${route.employee} — auto-reply "Received." in ${delaySec.toFixed(1)}s`);
-        setTimeout(async () => {
-          try {
-            // Typing indicator first
-            await adapter.sendTyping(msg.channelId);
-            // Wait for realistic typing duration (0.5-2s for a short word)
-            await new Promise(r => setTimeout(r, 500 + Math.random() * 1500));
-            await adapter.sendText(msg.channelId, "Received.");
-          } catch (err) {
-            console.error(`[gateway] Auto-reply failed:`, err instanceof Error ? err.message : err);
-          }
-        }, delaySec * 1000);
+      // No bot — auto-reply ONLY if ALL safety checks pass
+      // SAFETY: every check must pass or we silently drop (no reply)
+      const shouldAutoReply = this.checkAutoReplySafety(msg);
+      if (shouldAutoReply) {
+        const adapter = this.resolveAdapter(msg);
+        if (adapter) {
+          const delaySec = 3 + Math.random() * 12;
+          console.log(`[gateway] Auto-reply "Received." to DM from ${msg.senderId} in ${delaySec.toFixed(1)}s`);
+          setTimeout(async () => {
+            try {
+              await adapter.sendTyping(msg.channelId);
+              await new Promise(r => setTimeout(r, 500 + Math.random() * 1500));
+              await adapter.sendText(msg.channelId, "Received.");
+              this.autoReplyLog.set(msg.senderId, Date.now());
+              this.autoReplyCount++;
+            } catch (err) {
+              console.error(`[gateway] Auto-reply failed:`, err instanceof Error ? err.message : err);
+            }
+          }, delaySec * 1000);
+        }
       }
       return;
     }
@@ -275,6 +286,56 @@ export class Gateway {
   private resolveAdapter(msg: NormalizedMessage): PlatformAdapter | undefined {
     const key = `${msg.platform}:${msg.accountId ?? "default"}`;
     return this.adapters.get(key) ?? this.adapters.get(`${msg.platform}:default`);
+  }
+
+  /**
+   * Auto-reply safety gate — EVERY check must pass or we silently drop.
+   * This prevents the 1,582-message spam incident from 2026-04-27.
+   */
+  private checkAutoReplySafety(msg: NormalizedMessage): boolean {
+    // GATE 1: Auto-reply must be explicitly enabled (default: OFF)
+    if (!Gateway.AUTO_REPLY_ENABLED) {
+      return false;
+    }
+
+    // GATE 2: NEVER reply to group messages
+    if (msg.chatType === "group") {
+      return false;
+    }
+
+    // GATE 3: NEVER reply to historical/sync messages
+    if (msg.isHistorical) {
+      return false;
+    }
+
+    // GATE 4: NEVER reply to our own messages
+    if ((msg as any).key?.fromMe || msg.senderId === "status@broadcast") {
+      return false;
+    }
+
+    // GATE 5: NEVER reply to system messages (no text)
+    if (!msg.text || msg.text.trim().length === 0) {
+      return false;
+    }
+
+    // GATE 6: Rate limit — max 1 reply per contact per 24 hours
+    const lastReply = this.autoReplyLog.get(msg.senderId);
+    if (lastReply && Date.now() - lastReply < Gateway.AUTO_REPLY_COOLDOWN_MS) {
+      return false;
+    }
+
+    // GATE 7: Daily cap — max 20 auto-replies total per day
+    if (this.autoReplyCount >= Gateway.AUTO_REPLY_DAILY_CAP) {
+      console.warn(`[gateway] Auto-reply daily cap reached (${Gateway.AUTO_REPLY_DAILY_CAP}). No more auto-replies today.`);
+      return false;
+    }
+
+    // GATE 8: Skip read receipts, reactions, calls, contact cards, etc.
+    if (msg.dataCategory && msg.dataCategory !== "message") {
+      return false;
+    }
+
+    return true;
   }
 
   /** Health check all adapters + provider health */
