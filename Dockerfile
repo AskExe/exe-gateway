@@ -1,4 +1,4 @@
-# exe-os gateway — production Docker image
+# exe-gateway — production Docker image
 # Runs webhook server (HTTP :3100) + WebSocket relay (:3101)
 #
 # Build:   docker build -f deploy/Dockerfile -t exe-gateway .

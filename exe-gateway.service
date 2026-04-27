@@ -1,8 +1,8 @@
-# exe-os gateway — systemd service unit
+# exe-gateway — systemd service unit
 # Runs the gateway server outside Docker (direct Node.js on VPS).
 #
 # Install:
-#   cp deploy/exe-gateway.service /etc/systemd/system/
+#   cp exe-gateway.service /etc/systemd/system/
 #   systemctl daemon-reload
 #   systemctl enable --now exe-gateway
 #
@@ -10,7 +10,7 @@
 #   journalctl -u exe-gateway -f
 
 [Unit]
-Description=Exe OS Gateway — webhook server + WebSocket relay
+Description=exe-gateway — webhook server + WebSocket relay
 Documentation=https://askexe.com
 After=network-online.target
 Wants=network-online.target
@@ -20,11 +20,11 @@ Type=simple
 User=exe
 Group=exe
 
-# Working directory where exe-os is installed
-WorkingDirectory=/opt/exe-os
+# Working directory where exe-gateway is installed
+WorkingDirectory=/opt/exe-gateway
 
 # Entry point — compiled gateway binary
-ExecStart=/usr/bin/node /opt/exe-os/dist/bin/exe-gateway.js
+ExecStart=/usr/bin/node /opt/exe-gateway/dist/bin/exe-gateway.js
 
 # Restart policy — always restart with 5s backoff
 Restart=always
@@ -33,7 +33,7 @@ StartLimitIntervalSec=300
 StartLimitBurst=10
 
 # Environment file for secrets (not committed to git)
-EnvironmentFile=/opt/exe-os/.env
+EnvironmentFile=/opt/exe-gateway/.env
 
 # Logging to journal
 StandardOutput=journal
