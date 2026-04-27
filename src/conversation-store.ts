@@ -202,13 +202,44 @@ export async function upsertThread(
   pool?: pg.Pool,
 ): Promise<number> {
   const p = pool ?? getPool();
+  const gj = groupJid ?? null;
+
+  // For DMs (group_jid IS NULL), PostgreSQL's UNIQUE constraint doesn't match
+  // NULL != NULL, so we need to check explicitly first
+  if (gj === null) {
+    const existing = await p.query(
+      `SELECT id FROM gateway_threads
+       WHERE account_id = $1 AND contact_id = $2 AND group_jid IS NULL
+       LIMIT 1`,
+      [accountId, contactId],
+    );
+    if (existing.rows.length > 0) {
+      // Update last_message + increment count
+      await p.query(
+        `UPDATE gateway_threads SET last_message = now(), message_count = message_count + 1
+         WHERE id = $1`,
+        [existing.rows[0].id],
+      );
+      return existing.rows[0].id;
+    }
+    // Create new DM thread
+    const result = await p.query(
+      `INSERT INTO gateway_threads (account_id, contact_id, group_jid, message_count, last_message)
+       VALUES ($1, $2, NULL, 1, now())
+       RETURNING id`,
+      [accountId, contactId],
+    );
+    return result.rows[0].id;
+  }
+
+  // Group threads — ON CONFLICT works fine (group_jid is NOT NULL)
   const result = await p.query(
-    `INSERT INTO gateway_threads (account_id, contact_id, group_jid)
-     VALUES ($1, $2, $3)
+    `INSERT INTO gateway_threads (account_id, contact_id, group_jid, message_count, last_message)
+     VALUES ($1, $2, $3, 1, now())
      ON CONFLICT (account_id, contact_id, group_jid)
-     DO UPDATE SET account_id = EXCLUDED.account_id
+     DO UPDATE SET last_message = now(), message_count = gateway_threads.message_count + 1
      RETURNING id`,
-    [accountId, contactId, groupJid ?? null],
+    [accountId, contactId, gj],
   );
   return result.rows[0].id;
 }
