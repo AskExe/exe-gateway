@@ -1,37 +1,269 @@
-# exe-gateway
+<p align="center">
+  <strong>exe-gateway</strong><br>
+  Standalone multi-platform messaging gateway with human-like sending behavior.
+</p>
 
-Standalone webhook server + messaging gateway for multi-platform bot deployment.
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg" alt="Node 20+">
+  <img src="https://img.shields.io/badge/platforms-10-orange.svg" alt="10 Platforms">
+</p>
 
-## Supported Platforms
+---
 
-| Platform | Adapter | Status |
-|----------|---------|--------|
-| WhatsApp | Baileys (Web protocol) | Production |
-| Telegram | Grammy | Production |
-| Discord | discord.js / Carbon | Production |
-| Slack | Bolt / Web API | Production |
-| Email | Nodemailer + IMAP | Production |
-| iMessage | macOS native | Beta |
-| Signal | signal-cli | Beta |
-| Webchat | WebSocket | Production |
-| Webhook | Generic HTTP | Production |
+exe-gateway is a self-hosted messaging gateway that connects WhatsApp, Telegram, Discord, Slack, Email, iMessage, Signal, Webchat, and Webhooks behind a single REST API. It handles rate limiting, typing simulation, and multi-account support out of the box — so your messages look human, not automated.
+
+## Features
+
+| Feature | Details |
+|---------|---------|
+| **10 platform adapters** | WhatsApp (Baileys), Telegram (Grammy), Discord, Slack, Email (SMTP/IMAP), iMessage, Signal, Webchat, Webhook, CRM |
+| **Multi-account** | Unlimited numbers per platform. Each account gets its own session and rate limiter. |
+| **Human-like sending** | Typing simulation, randomized delays between messages, per-recipient pacing. |
+| **Anti-ban rate limiting** | Per-platform hourly/daily caps tuned to each platform's tolerance. |
+| **Full history sync** | First WhatsApp link pulls complete message history. |
+| **REST API** | Send messages, list groups, check contacts, view rate limits, health checks. |
+| **One-command install** | Single `curl` command sets up Node.js, clones the repo, builds, configures systemd. |
+| **Production-ready** | Systemd service, nginx config, Docker support, security-hardened. |
+| **Standalone** | Works on its own. Optional hooks for [Exe OS](https://github.com/AskExe/exe-os) integration. |
 
 ## Quick Start
 
+### One-command install (VPS — Ubuntu 22.04+ / Debian 12+)
+
 ```bash
+curl -fsSL https://raw.githubusercontent.com/AskExe/exe-gateway/main/install.sh | bash
+```
+
+This installs Node.js 20, clones the repo to `/opt/exe-gateway`, builds from source, creates a system user, generates an auth token, and sets up the systemd service.
+
+### Pair WhatsApp
+
+```bash
+node /opt/exe-gateway/pair-whatsapp.mjs my-account +1234567890
+```
+
+Scan the QR code with WhatsApp on your phone. The session persists across restarts.
+
+### Start the service
+
+```bash
+systemctl start exe-gateway
+```
+
+### Verify
+
+```bash
+curl -H "Authorization: Bearer <your-token>" http://localhost:3100/health
+```
+
+The auth token is printed during installation and stored in `/opt/exe-gateway/.env`.
+
+### Manual install (any platform)
+
+```bash
+git clone https://github.com/AskExe/exe-gateway.git
+cd exe-gateway
 npm install
 npm run build
-cp deploy/.env.example ~/.exe-os/gateway.json
+cp deploy/.env.example ~/.exe-os/gateway.json  # Edit with your config
 node dist/bin/exe-gateway.js
 ```
 
-## Configuration
+## WhatsApp IP Safety
 
-Config lives at `~/.exe-os/gateway.json`. See `deploy/.env.example` for all options.
+> **Running on a local machine (laptop, home server, office network)?**
+>
+> You're already on a residential IP — **skip this section entirely**. Tailscale is not needed. Just install, pair, and go.
 
-## Hooks (Integration with exe-os)
+WhatsApp actively detects and bans datacenter IP addresses. If you're running exe-gateway on a VPS or cloud server (AWS, DigitalOcean, Hostinger, Hetzner, etc.), you must route WhatsApp traffic through a residential IP.
 
-exe-gateway is standalone by default. To integrate with exe-os, inject hooks at startup:
+### Why this matters
+
+Connecting WhatsApp directly from a datacenter IP will trigger verification loops or outright bans. This is WhatsApp's anti-automation measure — it flags IPs that belong to known hosting providers.
+
+### Solution: Tailscale exit node
+
+Route your VPS traffic through a home machine using Tailscale's exit node feature. WhatsApp sees your residential IP instead of the datacenter.
+
+```
+VPS (Cloud/Datacenter)                Home Machine
+┌─────────────────────────┐           ┌─────────────────────────┐
+│  exe-gateway             │           │  Tailscale exit node     │
+│  ↓                       │           │  ↓                       │
+│  Tailscale client        │◄─────────►│  Home ISP router         │
+│  --exit-node=home        │ WireGuard │  (residential IP)        │
+└─────────────────────────┘  tunnel    └─────────────────────────┘
+                                                ↓
+                                        WhatsApp servers
+                                        see: residential IP
+```
+
+### Setup (VPS deployments only)
+
+**1. Install Tailscale on your home machine (the exit node):**
+
+```bash
+# macOS
+brew install tailscale
+sudo tailscaled &
+tailscale up --advertise-exit-node
+
+# Linux
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up --advertise-exit-node
+```
+
+**2. Approve the exit node** in [Tailscale admin](https://login.tailscale.com/admin/machines) — click the machine > Edit route settings > enable "Use as exit node."
+
+**3. On the VPS, point to the exit node:**
+
+```bash
+tailscale set --exit-node=<home-machine-name>
+```
+
+**4. Verify the residential IP is active:**
+
+```bash
+curl -s ifconfig.me
+# Should show your HOME IP, not the VPS datacenter IP
+```
+
+See [`docs/tailscale-exit-node.md`](docs/tailscale-exit-node.md) for troubleshooting, DNS issues, firewall config, and keeping the exit node online.
+
+## Multi-Account Configuration
+
+Config lives at `~/.exe-os/gateway.json`. Each platform supports multiple accounts with independent sessions and rate limiters.
+
+```json
+{
+  "port": 3100,
+  "authToken": "your-secret-token",
+  "adapters": {
+    "whatsapp": {
+      "enabled": true,
+      "accounts": [
+        {
+          "name": "sales",
+          "authDir": "/home/exe/.exe-os/.auth/whatsapp-sales"
+        },
+        {
+          "name": "support",
+          "authDir": "/home/exe/.exe-os/.auth/whatsapp-support"
+        }
+      ]
+    },
+    "telegram": {
+      "enabled": true,
+      "accounts": [
+        {
+          "name": "main-bot",
+          "botToken": "123456:ABC-DEF..."
+        }
+      ]
+    },
+    "discord": {
+      "enabled": true,
+      "accounts": [
+        {
+          "name": "community-bot",
+          "botToken": "your-discord-token",
+          "applicationId": "your-app-id"
+        }
+      ]
+    },
+    "slack": {
+      "enabled": true,
+      "accounts": [
+        {
+          "name": "workspace-bot",
+          "botToken": "xoxb-...",
+          "appToken": "xapp-..."
+        }
+      ]
+    },
+    "email": {
+      "enabled": true,
+      "accounts": [
+        {
+          "name": "notifications",
+          "smtpHost": "smtp.example.com",
+          "smtpPort": 587,
+          "smtpUser": "bot@example.com",
+          "smtpPass": "your-password",
+          "from": "bot@example.com"
+        }
+      ]
+    }
+  }
+}
+```
+
+Pair each WhatsApp account separately:
+
+```bash
+node /opt/exe-gateway/pair-whatsapp.mjs sales +1234567890
+node /opt/exe-gateway/pair-whatsapp.mjs support +0987654321
+```
+
+## API Reference
+
+All endpoints require the `Authorization: Bearer <token>` header (except `/health`).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Server health, uptime, registered platforms |
+| `POST` | `/api/send` | Send a message (rate-limited, with typing simulation) |
+| `GET` | `/api/groups` | List WhatsApp groups |
+| `GET` | `/api/group/:id` | Group metadata + participants |
+| `GET` | `/api/limits` | Rate limit stats per platform |
+| `POST` | `/webhook/:platform` | Incoming webhook payload from external platform |
+
+### Send a message
+
+```bash
+curl -X POST http://localhost:3100/api/send \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "platform": "whatsapp",
+    "account": "sales",
+    "to": "+1234567890",
+    "text": "Hey — just following up on our conversation."
+  }'
+```
+
+The message enters the outbound queue and is sent with realistic typing simulation and randomized delay. You don't need to manage pacing — the limiter handles it.
+
+### List groups
+
+```bash
+curl -H "Authorization: Bearer <token>" http://localhost:3100/api/groups
+```
+
+### Check rate limits
+
+```bash
+curl -H "Authorization: Bearer <token>" http://localhost:3100/api/limits
+```
+
+## Rate Limiting
+
+Outbound messages are paced per-platform with human-like timing. These are the defaults — tuned to avoid platform bans:
+
+| Platform | Per Hour | Per Day | Typing Simulation | Delay Between Messages |
+|----------|----------|---------|-------------------|----------------------|
+| WhatsApp | 30 | 200 | 1.5–8s (25 cps) | 5–15s per recipient |
+| Telegram | 60 | 500 | 1–5s (40 cps) | 2–8s per recipient |
+| Discord | 120 | 1,000 | 0.5–4s (50 cps) | 1–5s per recipient |
+| Slack | 120 | 1,000 | 0.5–4s (50 cps) | 1–5s per recipient |
+| Email | 20 | 100 | None | 10–30s per recipient |
+
+Inbound messages are also rate-limited: 10 req/s per sender, 100 req/s global (sliding window).
+
+## Integration with Exe OS (Optional)
+
+exe-gateway is fully standalone. To integrate with [Exe OS](https://github.com/AskExe/exe-os) for memory, wiki, and CRM hooks:
 
 ```typescript
 import { setHooks } from "@askexenow/exe-gateway";
@@ -44,6 +276,75 @@ setHooks({
 });
 ```
 
+This pipes all incoming messages through the Exe OS memory pipeline and broadcasts events to the organization bus.
+
+## Deployment
+
+### Systemd (recommended for VPS)
+
+The installer sets this up automatically. To configure manually:
+
+```bash
+cp exe-gateway.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now exe-gateway
+```
+
+View logs:
+
+```bash
+journalctl -u exe-gateway -f
+```
+
+The service runs as a dedicated `exe` system user with security hardening (read-only filesystem, private tmp, no new privileges, 512MB memory cap).
+
+### Nginx reverse proxy
+
+For SSL termination and public-facing deployments:
+
+```bash
+cp nginx-gateway.conf /etc/nginx/sites-available/gateway.yourdomain.com
+ln -s /etc/nginx/sites-available/gateway.yourdomain.com /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
+```
+
+Includes rate limiting (10 req/s webhooks, 5 conn/s WebSocket), CORS headers, and WebSocket upgrade support.
+
+### Docker
+
+```bash
+docker build -t exe-gateway .
+docker run -d \
+  --name exe-gateway \
+  -p 3100:3100 \
+  -p 3101:3101 \
+  -v ~/.exe-os:/home/exegateway/.exe-os \
+  exe-gateway
+```
+
+## Platform Adapters
+
+| Platform | Library | Status | Notes |
+|----------|---------|--------|-------|
+| WhatsApp | Baileys (Web protocol) | Production | Multi-account, full history sync, QR pairing |
+| Telegram | Grammy | Production | Bot API, inline keyboards, media |
+| Discord | discord.js | Production | Slash commands, threads, embeds |
+| Slack | Bolt + Web API | Production | Socket Mode, interactive messages |
+| Email | Nodemailer + IMAP | Production | SMTP outbound, IMAP inbound |
+| iMessage | macOS native | Beta | Requires macOS host |
+| Signal | signal-cli | Beta | Requires signal-cli daemon |
+| Webchat | WebSocket | Production | Browser widget, real-time |
+| Webhook | Generic HTTP | Production | Any platform via HTTP POST |
+| CRM | Exe CRM bridge | Production | Bi-directional contact/deal sync |
+
+## Contributing
+
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feat/my-feature`)
+3. Make your changes with tests
+4. Run `npm test` and `npm run typecheck`
+5. Open a PR
+
 ## License
 
-MIT
+[MIT](LICENSE)
