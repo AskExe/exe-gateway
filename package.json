@@ -24,11 +24,13 @@
     "grammy": "^1.30.0",
     "nodemailer": "^6.9.0",
     "openai": "^4.70.0",
+    "pg": "^8.20.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/nodemailer": "^6.4.0",
+    "@types/pg": "^8.20.0",
     "@types/ws": "^8.5.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",

@@ -85,3 +85,27 @@ export {
 
 // Outbound rate limiting
 export { OutboundLimiter, PLATFORM_LIMITS, type PlatformLimits } from "./outbound-limiter.js";
+
+// Database
+export { initPool, getPool, closePool, type DBConfig } from "./db.js";
+
+// Conversation store (PostgreSQL)
+export {
+  initConversationStore,
+  upsertAccount,
+  upsertContact,
+  upsertThread,
+  storeMessage,
+  getThreadMessages,
+  getThreads,
+  getContacts,
+  getContactDetail,
+  linkContactToCRM,
+  type GatewayMessage,
+  type GatewayContact,
+  type ThreadWithContact,
+  type StoreMessageParams,
+} from "./conversation-store.js";
+
+// Pipeline store (NormalizedMessage → PostgreSQL bridge)
+export { storeInboundMessage, storeConversation } from "./pipeline-store.js";
