@@ -57,11 +57,16 @@ function mapContentType(contentType: string): "image" | "video" | "audio" | "doc
 
 export class EmailAdapter implements PlatformAdapter {
   readonly platform = "email" as const;
+  readonly accountName: string;
 
   private transporter: Transporter | null = null;
   private fromAddress = "";
   private messageHandler: ((msg: NormalizedMessage) => Promise<void>) | null = null;
   private connected = false;
+
+  constructor(accountName = "default") {
+    this.accountName = accountName;
+  }
 
   async connect(config: PlatformConfig): Promise<void> {
     const {
@@ -98,7 +103,7 @@ export class EmailAdapter implements PlatformAdapter {
     }
 
     this.connected = true;
-    console.log(`[email] Connected to SMTP ${smtp_host}`);
+    console.log(`[email:${this.accountName}] Connected to SMTP ${smtp_host}`);
   }
 
   async disconnect(): Promise<void> {
@@ -145,7 +150,7 @@ export class EmailAdapter implements PlatformAdapter {
     try {
       await this.messageHandler(normalized);
     } catch (err) {
-      console.error("[email] Message handler error:", err);
+      console.error(`[email:${this.accountName}] Message handler error:`, err);
     }
   }
 

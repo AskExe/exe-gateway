@@ -21,7 +21,6 @@ import type {
   NormalizedMessage,
   PlatformAdapter,
   PlatformConfig,
-  GatewayPlatform,
 } from "./types.js";
 import { getHooks } from "./hooks.js";
 import { routeMessage } from "./router.js";
@@ -37,7 +36,7 @@ import { initCRMBridge } from "./crm-bridge.js";
 
 export interface GatewayOptions {
   config: GatewayConfig;
-  platformConfigs: Map<GatewayPlatform, PlatformConfig>;
+  platformConfigs: Map<string, PlatformConfig>;
   botRegistry: BotRegistry;
   failover?: FailoverCascade;
   sessionStore?: SessionStore;
@@ -49,8 +48,8 @@ export interface GatewayOptions {
 
 export class Gateway {
   private config: GatewayConfig;
-  private adapters = new Map<GatewayPlatform, PlatformAdapter>();
-  private platformConfigs: Map<GatewayPlatform, PlatformConfig>;
+  private adapters = new Map<string, PlatformAdapter>();
+  private platformConfigs: Map<string, PlatformConfig>;
   private botRegistry: BotRegistry;
   private rateLimiter?: RateLimiter;
   private sessionStore?: SessionStore;
@@ -73,8 +72,13 @@ export class Gateway {
   }
 
   registerAdapter(adapter: PlatformAdapter): void {
-    this.adapters.set(adapter.platform, adapter);
-    adapter.onMessage((msg) => this.handleMessage(msg));
+    const key = `${adapter.platform}:${adapter.accountName ?? "default"}`;
+    this.adapters.set(key, adapter);
+    adapter.onMessage((msg) => {
+      // Stamp accountId from the adapter that produced this message
+      msg.accountId = msg.accountId ?? adapter.accountName ?? "default";
+      return this.handleMessage(msg);
+    });
   }
 
   async start(): Promise<void> {
@@ -123,7 +127,7 @@ export class Gateway {
     if (this.rateLimiter) {
       const limitResult = this.rateLimiter.check(msg.senderId);
       if (!limitResult.allowed) {
-        const adapter = this.adapters.get(msg.platform);
+        const adapter = this.resolveAdapter(msg);
         if (adapter) {
           await adapter.sendText(msg.channelId, limitResult.reason ?? "Please slow down.");
         }
@@ -157,14 +161,14 @@ export class Gateway {
     const bot = this.botRegistry.get(route.employee);
     if (!bot) {
       console.error(`[gateway] No bot registered for target: ${route.employee}`);
-      const adapter = this.adapters.get(msg.platform);
+      const adapter = this.resolveAdapter(msg);
       if (adapter) {
         await adapter.sendText(msg.channelId, "Sorry, I'm not available right now.");
       }
       return;
     }
 
-    const adapter = this.adapters.get(msg.platform);
+    const adapter = this.resolveAdapter(msg);
     if (!adapter) return;
 
     // 5. Send typing indicator
@@ -245,9 +249,15 @@ export class Gateway {
     }
   }
 
+  /** Resolve adapter for a message — compound key with fallback */
+  private resolveAdapter(msg: NormalizedMessage): PlatformAdapter | undefined {
+    const key = `${msg.platform}:${msg.accountId ?? "default"}`;
+    return this.adapters.get(key) ?? this.adapters.get(`${msg.platform}:default`);
+  }
+
   /** Health check all adapters + provider health */
   async healthCheck(): Promise<{
-    adapters: Map<GatewayPlatform, { connected: boolean; latencyMs?: number }>;
+    adapters: Map<string, { connected: boolean; latencyMs?: number }>;
     providers?: Array<{ name: string; state: string; failureRate: number }>;
     bots: string[];
     uptime: number;
@@ -255,11 +265,11 @@ export class Gateway {
     alerts?: number;
   }> {
     const adapterHealth = new Map<
-      GatewayPlatform,
+      string,
       { connected: boolean; latencyMs?: number }
     >();
-    for (const [platform, adapter] of this.adapters) {
-      adapterHealth.set(platform, await adapter.healthCheck());
+    for (const [key, adapter] of this.adapters) {
+      adapterHealth.set(key, await adapter.healthCheck());
     }
 
     return {

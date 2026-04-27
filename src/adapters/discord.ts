@@ -55,10 +55,15 @@ interface DiscordWebhookPayload {
 
 export class DiscordAdapter implements PlatformAdapter {
   readonly platform = "discord" as const;
+  readonly accountName: string;
 
   private client: DiscordClient | null = null;
   private messageHandler: ((msg: NormalizedMessage) => Promise<void>) | null = null;
   private connected = false;
+
+  constructor(accountName = "default") {
+    this.accountName = accountName;
+  }
 
   async connect(config: PlatformConfig): Promise<void> {
     const { Client, GatewayIntentBits } = await import("discord.js");
@@ -80,7 +85,7 @@ export class DiscordAdapter implements PlatformAdapter {
 
     discordClient.on("ready", () => {
       this.connected = true;
-      console.log(`[discord] Connected as ${this.client?.user?.tag}`);
+      console.log(`[discord:${this.accountName}] Connected as ${this.client?.user?.tag}`);
     });
 
     discordClient.on("messageCreate", async (msg: unknown) => {
@@ -115,7 +120,7 @@ export class DiscordAdapter implements PlatformAdapter {
       try {
         await this.messageHandler(normalized);
       } catch (err) {
-        console.error("[discord] Message handler error:", err);
+        console.error(`[discord:${this.accountName}] Message handler error:`, err);
       }
     });
 
@@ -198,7 +203,7 @@ export class DiscordAdapter implements PlatformAdapter {
     try {
       await this.messageHandler(normalized);
     } catch (err) {
-      console.error("[discord] injectMessage handler error:", err);
+      console.error(`[discord:${this.accountName}] injectMessage handler error:`, err);
     }
   }
 

@@ -17,10 +17,15 @@ import type {
 
 export class TelegramAdapter implements PlatformAdapter {
   readonly platform = "telegram" as const;
+  readonly accountName: string;
 
   private bot: any = null; // Grammy Bot instance — dynamic import
   private messageHandler: ((msg: NormalizedMessage) => Promise<void>) | null = null;
   private connected = false;
+
+  constructor(accountName = "default") {
+    this.accountName = accountName;
+  }
 
   async connect(config: PlatformConfig): Promise<void> {
     const botToken = config.credentials.bot_token;
@@ -71,7 +76,7 @@ export class TelegramAdapter implements PlatformAdapter {
       try {
         await this.messageHandler(normalized);
       } catch (err) {
-        console.error("[telegram] Message handler error:", err);
+        console.error(`[telegram:${this.accountName}] Message handler error:`, err);
       }
     });
 
@@ -79,7 +84,7 @@ export class TelegramAdapter implements PlatformAdapter {
     this.bot.start({
       onStart: () => {
         this.connected = true;
-        console.log("[telegram] Connected via grammy (long polling)");
+        console.log(`[telegram:${this.accountName}] Connected via grammy (long polling)`);
       },
     });
   }
@@ -172,7 +177,7 @@ export class TelegramAdapter implements PlatformAdapter {
     try {
       await this.messageHandler(normalized);
     } catch (err) {
-      console.error("[telegram] injectMessage handler error:", err);
+      console.error(`[telegram:${this.accountName}] injectMessage handler error:`, err);
     }
   }
 

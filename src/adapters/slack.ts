@@ -17,12 +17,17 @@ import type {
 
 export class SlackAdapter implements PlatformAdapter {
   readonly platform = "slack" as const;
+  readonly accountName: string;
 
   private webClient: any = null; // WebClient — dynamic import
   private socketClient: any = null; // SocketModeClient — dynamic import
   private messageHandler: ((msg: NormalizedMessage) => Promise<void>) | null = null;
   private connected = false;
   private botUserId = "";
+
+  constructor(accountName = "default") {
+    this.accountName = accountName;
+  }
 
   async connect(config: PlatformConfig): Promise<void> {
     const { WebClient } = await import("@slack/web-api");
@@ -87,13 +92,13 @@ export class SlackAdapter implements PlatformAdapter {
       try {
         await this.messageHandler(normalized);
       } catch (err) {
-        console.error("[slack] Message handler error:", err);
+        console.error(`[slack:${this.accountName}] Message handler error:`, err);
       }
     });
 
     await this.socketClient.start();
     this.connected = true;
-    console.log("[slack] Connected via Socket Mode");
+    console.log(`[slack:${this.accountName}] Connected via Socket Mode`);
   }
 
   async disconnect(): Promise<void> {
@@ -171,7 +176,7 @@ export class SlackAdapter implements PlatformAdapter {
     try {
       await this.messageHandler(normalized);
     } catch (err) {
-      console.error("[slack] injectMessage handler error:", err);
+      console.error(`[slack:${this.accountName}] injectMessage handler error:`, err);
     }
   }
 

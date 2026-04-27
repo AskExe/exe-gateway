@@ -15,7 +15,7 @@ import { WebhookServer } from "../webhook-server.js";
 import { Gateway } from "../gateway.js";
 import { BotRegistry } from "../bot-registry.js";
 import { getHooks } from "../hooks.js";
-import type { GatewayPlatform, PlatformConfig } from "../types.js";
+import type { PlatformConfig } from "../types.js";
 
 const CONFIG_DIR = path.join(os.homedir(), ".exe-os");
 const CONFIG_PATH = path.join(CONFIG_DIR, "gateway.json");
@@ -79,7 +79,7 @@ async function main(): Promise<void> {
   });
 
   // Build Gateway orchestrator (message routing, bot processing, responses)
-  const platformConfigs = new Map<GatewayPlatform, PlatformConfig>();
+  const platformConfigs = new Map<string, PlatformConfig>();
   const botRegistry = new BotRegistry();
 
   const gateway = new Gateway({
@@ -119,43 +119,52 @@ async function main(): Promise<void> {
     }
   }
 
-  if (adapters.telegram?.enabled) {
+  if (adapters.telegram?.enabled || adapters.telegram?.accounts?.length) {
     const { TelegramAdapter } = await import("../adapters/telegram.js");
-    const telegram = new TelegramAdapter();
-    server.onPlatform("telegram", (body) => telegram.injectMessage(body));
-    gateway.registerAdapter(telegram);
-    platformConfigs.set("telegram", {
-      platform: "telegram",
-      permissions: { canRead: true, canWrite: true, canExecute: false },
-      credentials: adapters.telegram.credentials ?? {},
-    });
-    console.log("[exe-gateway] Telegram adapter registered");
+    const accounts = adapters.telegram.accounts ?? [{ name: "default" }];
+    for (const account of accounts) {
+      const telegram = new TelegramAdapter(account.name);
+      server.onPlatform("telegram", (body) => telegram.injectMessage(body));
+      gateway.registerAdapter(telegram);
+      platformConfigs.set(`telegram:${account.name}`, {
+        platform: "telegram",
+        permissions: { canRead: true, canWrite: true, canExecute: false },
+        credentials: { ...account, ...(adapters.telegram.credentials ?? {}) },
+      });
+      console.log(`[exe-gateway] Telegram account "${account.name}" registered`);
+    }
   }
 
-  if (adapters.discord?.enabled) {
+  if (adapters.discord?.enabled || adapters.discord?.accounts?.length) {
     const { DiscordAdapter } = await import("../adapters/discord.js");
-    const discord = new DiscordAdapter();
-    server.onPlatform("discord", (body) => discord.injectMessage(body));
-    gateway.registerAdapter(discord);
-    platformConfigs.set("discord", {
-      platform: "discord",
-      permissions: { canRead: true, canWrite: true, canExecute: false },
-      credentials: adapters.discord.credentials ?? {},
-    });
-    console.log("[exe-gateway] Discord adapter registered");
+    const accounts = adapters.discord.accounts ?? [{ name: "default" }];
+    for (const account of accounts) {
+      const discord = new DiscordAdapter(account.name);
+      server.onPlatform("discord", (body) => discord.injectMessage(body));
+      gateway.registerAdapter(discord);
+      platformConfigs.set(`discord:${account.name}`, {
+        platform: "discord",
+        permissions: { canRead: true, canWrite: true, canExecute: false },
+        credentials: { ...account, ...(adapters.discord.credentials ?? {}) },
+      });
+      console.log(`[exe-gateway] Discord account "${account.name}" registered`);
+    }
   }
 
-  if (adapters.slack?.enabled) {
+  if (adapters.slack?.enabled || adapters.slack?.accounts?.length) {
     const { SlackAdapter } = await import("../adapters/slack.js");
-    const slack = new SlackAdapter();
-    server.onPlatform("slack", (body) => slack.injectMessage(body));
-    gateway.registerAdapter(slack);
-    platformConfigs.set("slack", {
-      platform: "slack",
-      permissions: { canRead: true, canWrite: true, canExecute: false },
-      credentials: adapters.slack.credentials ?? {},
-    });
-    console.log("[exe-gateway] Slack adapter registered");
+    const accounts = adapters.slack.accounts ?? [{ name: "default" }];
+    for (const account of accounts) {
+      const slack = new SlackAdapter(account.name);
+      server.onPlatform("slack", (body) => slack.injectMessage(body));
+      gateway.registerAdapter(slack);
+      platformConfigs.set(`slack:${account.name}`, {
+        platform: "slack",
+        permissions: { canRead: true, canWrite: true, canExecute: false },
+        credentials: { ...account, ...(adapters.slack.credentials ?? {}) },
+      });
+      console.log(`[exe-gateway] Slack account "${account.name}" registered`);
+    }
   }
 
   if (adapters.imessage?.enabled) {
@@ -163,7 +172,7 @@ async function main(): Promise<void> {
     const imessage = new IMessageAdapter();
     server.onPlatform("imessage", (body) => imessage.injectMessage(body));
     gateway.registerAdapter(imessage);
-    platformConfigs.set("imessage", {
+    platformConfigs.set("imessage:default", {
       platform: "imessage",
       permissions: { canRead: true, canWrite: true, canExecute: true },
       credentials: adapters.imessage.credentials ?? {},
@@ -171,17 +180,20 @@ async function main(): Promise<void> {
     console.log("[exe-gateway] iMessage adapter registered");
   }
 
-  if (adapters.email?.enabled) {
+  if (adapters.email?.enabled || adapters.email?.accounts?.length) {
     const { EmailAdapter } = await import("../adapters/email.js");
-    const email = new EmailAdapter();
-    server.onPlatform("email", (body) => email.injectMessage(body));
-    gateway.registerAdapter(email);
-    platformConfigs.set("email", {
-      platform: "email",
-      permissions: { canRead: true, canWrite: true, canExecute: false },
-      credentials: adapters.email.credentials ?? {},
-    });
-    console.log("[exe-gateway] Email adapter registered");
+    const accounts = adapters.email.accounts ?? [{ name: "default" }];
+    for (const account of accounts) {
+      const email = new EmailAdapter(account.name);
+      server.onPlatform("email", (body) => email.injectMessage(body));
+      gateway.registerAdapter(email);
+      platformConfigs.set(`email:${account.name}`, {
+        platform: "email",
+        permissions: { canRead: true, canWrite: true, canExecute: false },
+        credentials: { ...account, ...(adapters.email.credentials ?? {}) },
+      });
+      console.log(`[exe-gateway] Email account "${account.name}" registered`);
+    }
   }
 
   if (adapters.webhook?.enabled) {
@@ -189,7 +201,7 @@ async function main(): Promise<void> {
     const webhook = new WebhookAdapter();
     server.onPlatform("generic", (body) => webhook.injectMessage(body));
     gateway.registerAdapter(webhook);
-    platformConfigs.set("webhook", {
+    platformConfigs.set("webhook:default", {
       platform: "webhook",
       permissions: { canRead: true, canWrite: false, canExecute: false },
       credentials: adapters.webhook.credentials ?? {},

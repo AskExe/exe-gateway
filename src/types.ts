@@ -148,6 +148,7 @@ export interface SendOptions {
 /** Platform adapter — thin wrapper around OpenClaw extension */
 export interface PlatformAdapter {
   readonly platform: GatewayPlatform;
+  readonly accountName?: string;
   connect(config: PlatformConfig): Promise<void>;
   disconnect(): Promise<void>;
   onMessage(handler: (msg: NormalizedMessage) => Promise<void>): void;
