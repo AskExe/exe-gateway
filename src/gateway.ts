@@ -143,6 +143,16 @@ export class Gateway {
       console.error("[gateway] Pipeline inbound ingest error:", err);
     });
 
+    // 2c. Store in PostgreSQL (standalone — no hooks needed)
+    try {
+      const { storeInboundMessage } = await import("./pipeline-store.js");
+      storeInboundMessage(msg).catch((err: unknown) => {
+        console.error("[gateway] PostgreSQL store error:", err);
+      });
+    } catch {
+      // pipeline-store not available or DB not configured — silent
+    }
+
     // 3. Route message
     const route = routeMessage(msg, this.config);
     console.log(

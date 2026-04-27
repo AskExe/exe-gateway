@@ -15,7 +15,10 @@ import { WebhookServer } from "../webhook-server.js";
 import { Gateway } from "../gateway.js";
 import { BotRegistry } from "../bot-registry.js";
 import { getHooks } from "../hooks.js";
-import type { PlatformConfig } from "../types.js";
+import { initPool, closePool } from "../db.js";
+import { initConversationStore, storeMessage, upsertAccount, upsertContact } from "../conversation-store.js";
+import { storeInboundMessage } from "../pipeline-store.js";
+import type { PlatformConfig, NormalizedMessage } from "../types.js";
 
 const CONFIG_DIR = path.join(os.homedir(), ".exe-os");
 const CONFIG_PATH = path.join(CONFIG_DIR, "gateway.json");
@@ -26,6 +29,7 @@ interface GatewayJsonConfig {
   host?: string;
   authToken?: string;
   whatsappVerifyToken?: string;
+  database?: { host: string; port: number; user: string; password: string; database: string };
   adapters?: Record<string, {
     enabled?: boolean;
     credentials?: Record<string, string>;
@@ -70,6 +74,20 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
   const port = config.port ?? DEFAULT_PORT;
+
+  // Initialize PostgreSQL if database config is present
+  if (config.database) {
+    try {
+      initPool(config.database);
+      await initConversationStore();
+      console.log(`[exe-gateway] PostgreSQL connected (${config.database.host}:${config.database.port}/${config.database.database})`);
+    } catch (err) {
+      console.error(`[exe-gateway] PostgreSQL init failed:`, err instanceof Error ? err.message : err);
+      console.error(`[exe-gateway] Continuing without conversation storage.`);
+    }
+  } else {
+    console.log(`[exe-gateway] No database config — running without conversation storage.`);
+  }
 
   const server = new WebhookServer({
     port,
