@@ -18,7 +18,9 @@ import type {
   DataCategory,
 } from "../types.js";
 
-const RECONNECT_DELAY_MS = 5_000;
+const INITIAL_RECONNECT_DELAY_MS = 10_000; // Start at 10s
+const MAX_RECONNECT_DELAY_MS = 300_000;   // Cap at 5 minutes
+const MAX_RECONNECT_ATTEMPTS = 10;        // Give up after 10 retries per session
 const AUTH_DIR = join(homedir(), ".exe-os", "whatsapp-auth");
 
 // Baileys types — imported dynamically to avoid top-level ESM issues
@@ -32,6 +34,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private connected = false;
   private abortController: AbortController | null = null;
   private authDir = AUTH_DIR;
+  private reconnectAttempts = 0;
+  private reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
 
   async connect(config: PlatformConfig): Promise<void> {
     this.authDir = config.credentials.authDir ?? AUTH_DIR;
@@ -72,15 +76,25 @@ export class WhatsAppAdapter implements PlatformAdapter {
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
         if (shouldReconnect && !this.abortController?.signal.aborted) {
-          console.log(`[whatsapp] Connection closed (${statusCode}), reconnecting...`);
-          setTimeout(() => void this.connect(config), RECONNECT_DELAY_MS);
+          this.reconnectAttempts++;
+          if (this.reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+            console.error(`[whatsapp] Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) exceeded. Stopping to protect account.`);
+            console.error(`[whatsapp] Manual restart required: systemctl restart exe-gateway`);
+            return;
+          }
+          // Exponential backoff: 10s, 20s, 40s, 80s, 160s, 300s (capped)
+          this.reconnectDelay = Math.min(this.reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
+          console.log(`[whatsapp] Connection closed (${statusCode}), reconnecting in ${Math.round(this.reconnectDelay / 1000)}s (attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+          setTimeout(() => void this.connect(config), this.reconnectDelay);
         } else {
-          console.log("[whatsapp] Logged out — clear auth and re-scan QR");
+          console.log("[whatsapp] Logged out — clear auth and re-pair");
         }
       }
 
       if (connection === "open") {
         this.connected = true;
+        this.reconnectAttempts = 0; // Reset on successful connection
+        this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
         console.log("[whatsapp] Connected via Baileys (linked device)");
       }
     });
