@@ -82,52 +82,64 @@ WhatsApp actively detects and bans datacenter IP addresses. If you're running ex
 
 Connecting WhatsApp directly from a datacenter IP will trigger verification loops or outright bans. This is WhatsApp's anti-automation measure — it flags IPs that belong to known hosting providers.
 
-### Solution: Tailscale exit node
+### Solution A: SOCKS proxy (recommended)
 
-Route your VPS traffic through a home machine using Tailscale's exit node feature. WhatsApp sees your residential IP instead of the datacenter.
+Route only WhatsApp traffic through your home machine via a lightweight SOCKS5 proxy over Tailscale. This avoids routing ALL VPS traffic through the exit node, which can break Cloudflare and other services.
 
 ```
 VPS (Cloud/Datacenter)                Home Machine
 ┌─────────────────────────┐           ┌─────────────────────────┐
-│  exe-gateway             │           │  Tailscale exit node     │
-│  ↓                       │           │  ↓                       │
-│  Tailscale client        │◄─────────►│  Home ISP router         │
-│  --exit-node=home        │ WireGuard │  (residential IP)        │
-└─────────────────────────┘  tunnel    └─────────────────────────┘
+│  exe-gateway             │           │  microsocks (SOCKS5)     │
+│  Baileys + SocksProxy    │◄─────────►│  bound to Tailscale IP   │
+│  (only WhatsApp traffic) │ Tailscale │  (residential IP)        │
+└─────────────────────────┘  mesh     └─────────────────────────┘
                                                 ↓
                                         WhatsApp servers
                                         see: residential IP
 ```
 
-### Setup (VPS deployments only)
-
-**1. Install Tailscale on your home machine (the exit node):**
+**1. Install a SOCKS5 proxy on your home machine:**
 
 ```bash
 # macOS
-brew install tailscale
-sudo tailscaled &
-tailscale up --advertise-exit-node
+brew install microsocks
+microsocks -i $(tailscale ip -4) -p 1080 &
 
 # Linux
-curl -fsSL https://tailscale.com/install.sh | sh
+apt install microsocks
+microsocks -i $(tailscale ip -4) -p 1080 &
+```
+
+**2. Configure exe-gateway to use the proxy:**
+
+```bash
+# In .env
+WHATSAPP_PROXY_URL=socks5://<home-tailscale-ip>:1080
+```
+
+**3. Verify:**
+
+```bash
+# From VPS — should show your home IP
+curl --socks5-hostname <home-tailscale-ip>:1080 https://ifconfig.me
+```
+
+### Solution B: Tailscale exit node (simpler but routes all traffic)
+
+Route ALL VPS traffic through a home machine using Tailscale's exit node feature. Simpler setup but can interfere with Cloudflare, nginx, and other services on the VPS.
+
+```bash
+# Home machine
 tailscale up --advertise-exit-node
-```
 
-**2. Approve the exit node** in [Tailscale admin](https://login.tailscale.com/admin/machines) — click the machine > Edit route settings > enable "Use as exit node."
-
-**3. On the VPS, point to the exit node:**
-
-```bash
+# VPS
 tailscale set --exit-node=<home-machine-name>
+
+# Verify
+curl -s ifconfig.me  # Should show HOME IP
 ```
 
-**4. Verify the residential IP is active:**
-
-```bash
-curl -s ifconfig.me
-# Should show your HOME IP, not the VPS datacenter IP
-```
+**Warning:** Exit node routes all traffic, including return paths for inbound connections. If your VPS serves websites behind Cloudflare or a reverse proxy, use Solution A instead.
 
 See [`docs/tailscale-exit-node.md`](docs/tailscale-exit-node.md) for troubleshooting, DNS issues, firewall config, and keeping the exit node online.
 
@@ -260,6 +272,57 @@ Outbound messages are paced per-platform with human-like timing. These are the d
 | Email | 20 | 100 | None | 10–30s per recipient |
 
 Inbound messages are also rate-limited: 10 req/s per sender, 100 req/s global (sliding window).
+
+## Data Ingestion Adapters
+
+exe-gateway serves as the data ingestion layer for the Exe platform. It runs API adapters (cron or webhook) that pull data from clients' external systems and stage it for routing into the wiki and CRM.
+
+### How it works
+
+```
+External APIs → exe-gateway adapters → staging.raw_imports → (routing handled downstream)
+```
+
+The gateway's job is to **pull and stage** — it does not route data into wiki or CRM schemas. Routing happens in a separate transform step after staging.
+
+### Adapter lifecycle
+
+1. Adapter runs on a configurable schedule (cron: 15min / hourly / daily)
+2. Checks `staging.sync_cursors` for the last pull position per source
+3. Pulls new/updated records from the external API
+4. Writes raw JSON to `staging.raw_imports` (same Postgres instance, `staging` schema)
+5. Updates `sync_cursors` with the new position
+
+For platforms that support it (Stripe, Asana), webhooks provide real-time ingestion alongside cron-based pulls.
+
+### Supported adapters (current / planned)
+
+| Adapter | Protocol | Status |
+|---------|----------|--------|
+| Xero | OAuth 2.0 REST | Planned |
+| Stripe | REST + Webhooks | Planned |
+| Asana | REST + Webhooks | Planned |
+| Banking APIs | Open Banking REST | Planned |
+| QuickBooks | OAuth 2.0 REST | Planned |
+
+### Configuration
+
+Each adapter is configured via environment variables:
+
+```bash
+# Example: Xero adapter
+XERO_CLIENT_ID=your-client-id
+XERO_CLIENT_SECRET=your-client-secret
+XERO_TENANT_ID=your-tenant-id
+XERO_SYNC_INTERVAL=hourly    # 15min | hourly | daily
+```
+
+### Related repos
+
+- **[exe-wiki/ARCHITECTURE.md](https://github.com/AskExe/exe-wiki/blob/master/ARCHITECTURE.md)** — Full staging/routing architecture, schema definitions, routing rules
+- **[exe-crm](https://github.com/AskExe/exe-crm)** — CRM-side entity mapping and how routed data lands in contacts/deals/activities
+
+---
 
 ## Integration with Exe OS (Optional)
 
