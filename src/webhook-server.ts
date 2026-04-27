@@ -173,6 +173,48 @@ export class WebhookServer {
       return;
     }
 
+    // GET /api/threads — list threads with contact info
+    if (method === "GET" && url.startsWith("/api/threads") && !url.startsWith("/api/threads/")) {
+      if (this.config.authToken && !this.verifyAuth(req)) {
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      await this.handleApiThreads(req, res);
+      return;
+    }
+
+    // GET /api/threads/:id/messages — paginated messages
+    if (method === "GET" && /^\/api\/threads\/\d+\/messages/.test(url)) {
+      if (this.config.authToken && !this.verifyAuth(req)) {
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      const threadId = parseInt(url.match(/\/api\/threads\/(\d+)\/messages/)![1], 10);
+      await this.handleApiThreadMessages(req, res, threadId);
+      return;
+    }
+
+    // GET /api/contacts — list contacts
+    if (method === "GET" && url.startsWith("/api/contacts") && !url.startsWith("/api/contacts/")) {
+      if (this.config.authToken && !this.verifyAuth(req)) {
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      await this.handleApiContacts(req, res);
+      return;
+    }
+
+    // GET /api/contacts/:id — contact detail
+    if (method === "GET" && /^\/api\/contacts\/\d+/.test(url)) {
+      if (this.config.authToken && !this.verifyAuth(req)) {
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      const contactId = parseInt(url.match(/\/api\/contacts\/(\d+)/)![1], 10);
+      await this.handleApiContactDetail(res, contactId);
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   }
 
@@ -369,6 +411,73 @@ export class WebhookServer {
     }
   }
 
+  // ---- Conversation query API handlers ----
+
+  private async handleApiThreads(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const { getThreads } = await import("./conversation-store.js");
+      const params = parseQuery(req.url ?? "");
+      const accountId = params.account_id ? parseInt(params.account_id, 10) : undefined;
+      const limit = clampLimit(params.limit);
+      const offset = parseInt(params.offset ?? "0", 10) || 0;
+
+      const threads = await getThreads({ accountId, limit, offset });
+      sendJson(res, 200, { threads: threads as unknown as Record<string, unknown>[] } as Record<string, unknown>);
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  private async handleApiThreadMessages(req: IncomingMessage, res: ServerResponse, threadId: number): Promise<void> {
+    try {
+      const { getThreadMessages } = await import("./conversation-store.js");
+      const params = parseQuery(req.url ?? "");
+      const limit = clampLimit(params.limit);
+      const offset = parseInt(params.offset ?? "0", 10) || 0;
+
+      const messages = await getThreadMessages(threadId, limit, offset);
+      sendJson(res, 200, { messages: messages as unknown as Record<string, unknown>[] } as Record<string, unknown>);
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  private async handleApiContacts(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const { getContacts } = await import("./conversation-store.js");
+      const params = parseQuery(req.url ?? "");
+      const limit = clampLimit(params.limit);
+      const offset = parseInt(params.offset ?? "0", 10) || 0;
+
+      let contacts = await getContacts({ limit, offset });
+
+      // Filter by CRM link status if requested
+      if (params.crm_linked === "true") {
+        contacts = contacts.filter((c) => c.crmPersonId != null);
+      } else if (params.crm_linked === "false") {
+        contacts = contacts.filter((c) => c.crmPersonId == null);
+      }
+
+      sendJson(res, 200, { contacts: contacts as unknown as Record<string, unknown>[] } as Record<string, unknown>);
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  private async handleApiContactDetail(res: ServerResponse, contactId: number): Promise<void> {
+    try {
+      const { getContactDetail } = await import("./conversation-store.js");
+      const contact = await getContactDetail(contactId);
+      if (!contact) {
+        sendJson(res, 404, { error: "Contact not found" });
+        return;
+      }
+      sendJson(res, 200, contact as unknown as Record<string, unknown>);
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   private async handleApiGroupInfo(res: ServerResponse, groupId: string): Promise<void> {
     try {
       const adapter = this.adapters.get("whatsapp");
@@ -396,6 +505,26 @@ export class WebhookServer {
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
     }
   }
+}
+
+/** Parse query string from a URL into key-value pairs */
+function parseQuery(url: string): Record<string, string> {
+  const idx = url.indexOf("?");
+  if (idx === -1) return {};
+  const qs = url.slice(idx + 1);
+  const params: Record<string, string> = {};
+  for (const pair of qs.split("&")) {
+    const [key, val] = pair.split("=");
+    if (key) params[decodeURIComponent(key)] = decodeURIComponent(val ?? "");
+  }
+  return params;
+}
+
+/** Clamp limit to 1-200 range, default 50 */
+function clampLimit(raw?: string): number {
+  const n = parseInt(raw ?? "50", 10);
+  if (isNaN(n) || n < 1) return 50;
+  return Math.min(n, 200);
 }
 
 /** Extract platform name from URL path /webhook/:platform */
