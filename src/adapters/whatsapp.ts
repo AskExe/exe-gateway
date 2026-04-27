@@ -57,7 +57,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
       version,
       printQRInTerminal: true,
       browser: ["exe-os", "cli", "1.0"],
-      syncFullHistory: false,
+      syncFullHistory: true,  // Always sync — business accounts need full conversation history
       markOnlineOnConnect: false,
     });
 
@@ -99,7 +99,39 @@ export class WhatsAppAdapter implements PlatformAdapter {
       }
     });
 
-    // Incoming messages
+    // History sync — captures all historical messages on first link
+    sock.ev.on("messaging-history.set" as any, (data: any) => {
+      const { messages = [], chats = [], contacts = [], isLatest } = data;
+      console.log(
+        `[whatsapp] History sync: ${messages.length} messages, ${chats.length} chats, ${contacts.length} contacts` +
+        (isLatest ? " (final batch)" : " (more coming...)"),
+      );
+
+      if (!this.messageHandler) return;
+
+      // Process historical messages — mark them as historical so onIngest can handle appropriately
+      for (const msg of messages) {
+        const normalized = this.normalizeMessage(msg.message ?? msg);
+        if (normalized) {
+          normalized.isHistorical = true;
+          void this.messageHandler(normalized).catch((err) => {
+            console.error("[whatsapp] History message handler error:", err);
+          });
+        }
+      }
+
+      // Process historical contacts
+      for (const contact of contacts) {
+        const synced = this.normalizeContactSync(contact);
+        if (synced) {
+          void this.messageHandler(synced).catch((err) => {
+            console.error("[whatsapp] History contact handler error:", err);
+          });
+        }
+      }
+    });
+
+    // Live incoming messages (real-time)
     sock.ev.on("messages.upsert", (upsert: any) => {
       if (!this.messageHandler) return;
       const { messages, type } = upsert;
