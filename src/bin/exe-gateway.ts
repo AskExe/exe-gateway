@@ -93,7 +93,7 @@ async function main(): Promise<void> {
   const adapters = config.adapters ?? {};
 
   if (adapters.whatsapp?.enabled) {
-    const { WhatsAppAdapter } = await import("../gateway/adapters/whatsapp.js");
+    const { WhatsAppAdapter } = await import("../adapters/whatsapp.js");
     const wa = new WhatsAppAdapter();
     server.onPlatform("whatsapp", (body) => wa.injectMessage(body));
     gateway.registerAdapter(wa);
@@ -106,7 +106,7 @@ async function main(): Promise<void> {
   }
 
   if (adapters.telegram?.enabled) {
-    const { TelegramAdapter } = await import("../gateway/adapters/telegram.js");
+    const { TelegramAdapter } = await import("../adapters/telegram.js");
     const telegram = new TelegramAdapter();
     server.onPlatform("telegram", (body) => telegram.injectMessage(body));
     gateway.registerAdapter(telegram);
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
   }
 
   if (adapters.discord?.enabled) {
-    const { DiscordAdapter } = await import("../gateway/adapters/discord.js");
+    const { DiscordAdapter } = await import("../adapters/discord.js");
     const discord = new DiscordAdapter();
     server.onPlatform("discord", (body) => discord.injectMessage(body));
     gateway.registerAdapter(discord);
@@ -132,7 +132,7 @@ async function main(): Promise<void> {
   }
 
   if (adapters.slack?.enabled) {
-    const { SlackAdapter } = await import("../gateway/adapters/slack.js");
+    const { SlackAdapter } = await import("../adapters/slack.js");
     const slack = new SlackAdapter();
     server.onPlatform("slack", (body) => slack.injectMessage(body));
     gateway.registerAdapter(slack);
@@ -145,7 +145,7 @@ async function main(): Promise<void> {
   }
 
   if (adapters.imessage?.enabled) {
-    const { IMessageAdapter } = await import("../gateway/adapters/imessage.js");
+    const { IMessageAdapter } = await import("../adapters/imessage.js");
     const imessage = new IMessageAdapter();
     server.onPlatform("imessage", (body) => imessage.injectMessage(body));
     gateway.registerAdapter(imessage);
@@ -158,7 +158,7 @@ async function main(): Promise<void> {
   }
 
   if (adapters.email?.enabled) {
-    const { EmailAdapter } = await import("../gateway/adapters/email.js");
+    const { EmailAdapter } = await import("../adapters/email.js");
     const email = new EmailAdapter();
     server.onPlatform("email", (body) => email.injectMessage(body));
     gateway.registerAdapter(email);
@@ -171,7 +171,7 @@ async function main(): Promise<void> {
   }
 
   if (adapters.webhook?.enabled) {
-    const { WebhookAdapter } = await import("../gateway/adapters/webhook.js");
+    const { WebhookAdapter } = await import("../adapters/webhook.js");
     const webhook = new WebhookAdapter();
     server.onPlatform("generic", (body) => webhook.injectMessage(body));
     gateway.registerAdapter(webhook);
@@ -185,7 +185,7 @@ async function main(): Promise<void> {
 
   // CRM webhook adapter — always enabled (trigger engine evaluates events)
   {
-    const { createCRMWebhookHandler } = await import("../gateway/adapters/crm-webhook.js");
+    const { createCRMWebhookHandler } = await import("../adapters/crm-webhook.js");
     const handler = createCRMWebhookHandler();
     server.onPlatform("crm", handler);
     console.log("[exe-gateway] CRM webhook adapter registered");

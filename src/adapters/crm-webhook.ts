@@ -21,27 +21,40 @@ interface CRMEvent {
   record: Record<string, unknown>;
 }
 
+interface Condition {
+  field: string;
+  op: "eq" | "neq" | "gt" | "lt" | "gte" | "lte" | "contains" | "not_contains";
+  value: string | number | boolean;
+}
+
+interface Action {
+  type: string;
+  params: Record<string, string>;
+  requires_approval?: boolean;
+}
+
 interface Trigger {
   id: string;
   name: string;
-  eventType: string;
-  objectType: string;
-  conditions?: Record<string, unknown>;
-  actions: Array<{ type: string; config: Record<string, unknown> }>;
+  event: string;
+  conditions: Condition[];
+  actions: Action[];
+  enabled: boolean;
+  project?: string;
 }
 
 interface TriggerFireLog {
   triggerId: string;
   triggerName: string;
-  eventType: string;
-  objectType: string;
+  event: string;
   firedAt: string;
-  actionsExecuted: number;
-  success: boolean;
-  error?: string;
+  actionsExecuted: Array<{ type: string; success: boolean; error?: string }>;
 }
 
-type ActionExecutor = (action: { type: string; config: Record<string, unknown> }, event: CRMEvent) => Promise<void>;
+type ActionExecutor = (
+  action: Action,
+  record: Record<string, unknown>,
+) => Promise<{ success: boolean; error?: string }>;
 
 // ---------------------------------------------------------------------------
 // Twenty webhook payload structure
@@ -113,6 +126,62 @@ export function parseTwentyWebhook(
 }
 
 // ---------------------------------------------------------------------------
+// Standalone trigger evaluator (used when no onCRMEvent hook is injected)
+// ---------------------------------------------------------------------------
+
+function evaluateCondition(condition: Condition, record: Record<string, unknown>): boolean {
+  const actual = record[condition.field];
+  const expected = condition.value;
+  switch (condition.op) {
+    case "eq": return actual === expected;
+    case "neq": return actual !== expected;
+    case "gt": return (actual as number) > (expected as number);
+    case "lt": return (actual as number) < (expected as number);
+    case "gte": return (actual as number) >= (expected as number);
+    case "lte": return (actual as number) <= (expected as number);
+    case "contains": return typeof actual === "string" && actual.includes(String(expected));
+    case "not_contains": return typeof actual === "string" && !actual.includes(String(expected));
+    default: return false;
+  }
+}
+
+async function evaluateTriggersLocally(
+  event: CRMEvent,
+  triggers: Trigger[],
+  executor?: ActionExecutor,
+): Promise<TriggerFireLog[]> {
+  const eventKey = `${event.objectType}.${event.eventType}`;
+  const logs: TriggerFireLog[] = [];
+
+  for (const trigger of triggers) {
+    if (!trigger.enabled || trigger.event !== eventKey) continue;
+
+    const allMatch = trigger.conditions.every((c) => evaluateCondition(c, event.record));
+    if (!allMatch) continue;
+
+    const actionsExecuted: Array<{ type: string; success: boolean; error?: string }> = [];
+    for (const action of trigger.actions) {
+      if (executor) {
+        const result = await executor(action, event.record);
+        actionsExecuted.push({ type: action.type, ...result });
+      } else {
+        actionsExecuted.push({ type: action.type, success: true });
+      }
+    }
+
+    logs.push({
+      triggerId: trigger.id,
+      triggerName: trigger.name,
+      event: trigger.event,
+      firedAt: new Date().toISOString(),
+      actionsExecuted,
+    });
+  }
+
+  return logs;
+}
+
+// ---------------------------------------------------------------------------
 // Webhook handler
 // ---------------------------------------------------------------------------
 
@@ -120,8 +189,8 @@ export function parseTwentyWebhook(
  * Create a webhook handler function for CRM events.
  * Register this with WebhookServer.onPlatform("crm", handler).
  *
- * @param executor Optional custom action executor (for testing).
- * @param onFired Optional callback when triggers fire (for audit logging).
+ * When an onCRMEvent hook is injected (via setHooks), it delegates to that.
+ * Otherwise uses a built-in standalone trigger evaluator.
  */
 export function createCRMWebhookHandler(options?: {
   executor?: ActionExecutor;
@@ -146,7 +215,7 @@ export function createCRMWebhookHandler(options?: {
       const onCRM = getHooks().onCRMEvent;
       const logs = onCRM
         ? (await onCRM(event, options?.executor, options?.triggers)) as TriggerFireLog[]
-        : [];
+        : await evaluateTriggersLocally(event, options?.triggers ?? [], options?.executor);
 
       if (logs.length > 0 && options?.onFired) {
         options.onFired(logs);
