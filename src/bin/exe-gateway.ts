@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * exe-os gateway — CLI entry point for the webhook server + gateway.
+ * exe-gateway — CLI entry point for the webhook server + gateway.
  *
  * Entry: `exe-os gateway` or `node dist/bin/exe-gateway.js`
  * Reads config from ~/.exe-os/gateway.json
@@ -14,6 +14,7 @@ import os from "node:os";
 import { WebhookServer } from "../webhook-server.js";
 import { Gateway } from "../gateway.js";
 import { BotRegistry } from "../bot-registry.js";
+import { getHooks } from "../hooks.js";
 import type { GatewayPlatform, PlatformConfig } from "../types.js";
 
 const CONFIG_DIR = path.join(os.homedir(), ".exe-os");
@@ -49,17 +50,18 @@ function loadConfig(): GatewayJsonConfig {
 }
 
 async function main(): Promise<void> {
-  // VPS image hard license gate — refuse to boot in production without a
-  // valid license key. No-op in dev / CI / laptop use. Audit 2026-04-16 §2b.
-  try {
-    const { assertVpsLicense } = await import("../lib/license.js");
-    const license = await assertVpsLicense();
-    if (process.env.NODE_ENV === "production") {
-      console.log(`[exe-gateway] License: plan=${license.plan}`);
+  // License gate — if a hook is injected, validate. Otherwise MIT mode (boot freely).
+  const assertLicense = getHooks().assertLicense;
+  if (assertLicense) {
+    try {
+      const license = await assertLicense();
+      if (process.env.NODE_ENV === "production") {
+        console.log(`[exe-gateway] License: plan=${license.plan}`);
+      }
+    } catch (err) {
+      console.error(`[exe-gateway] ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
     }
-  } catch (err) {
-    console.error(`[exe-gateway] ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
   }
 
   const config = loadConfig();

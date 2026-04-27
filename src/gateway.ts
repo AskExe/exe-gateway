@@ -23,7 +23,7 @@ import type {
   PlatformConfig,
   GatewayPlatform,
 } from "./types.js";
-import { orgBus } from "@askexenow/exe-os/dist/lib/state-bus.js";
+import { getHooks } from "./hooks.js";
 import { routeMessage } from "./router.js";
 import type { BotRegistry } from "./bot-registry.js";
 import type { RateLimiter } from "./rate-limiter.js";
@@ -34,7 +34,6 @@ import type { FailoverCascade } from "./failover.js";
 import type { CustomerStore } from "./customer-store.js";
 import { buildDegradationMessage } from "./reliability.js";
 import { initCRMBridge } from "./crm-bridge.js";
-import { ingest as pipelineIngest } from "@askexenow/exe-os/dist/lib/pipeline-router.js";
 
 export interface GatewayOptions {
   config: GatewayConfig;
@@ -136,7 +135,7 @@ export class Gateway {
     this.customerStore?.resolve(msg.platform, msg.senderId);
 
     // 2b. Pipeline ingest — fan out inbound message to all sinks (CRM, memory, wiki, conversation store)
-    pipelineIngest(msg).catch((err) => {
+    getHooks().onIngest?.(msg)?.catch((err: unknown) => {
       console.error("[gateway] Pipeline inbound ingest error:", err);
     });
 
@@ -146,7 +145,7 @@ export class Gateway {
       `[gateway] ${msg.platform}/${msg.senderId} → ${route.employee} (${route.routeName})`,
     );
 
-    orgBus.emit({
+    getHooks().onEvent?.({
       type: "gateway_message",
       platform: msg.platform,
       senderId: msg.senderId,
@@ -222,7 +221,7 @@ export class Gateway {
       });
 
       // 13. Pipeline ingest with response — fan out conversation to all sinks
-      pipelineIngest(msg, response, route.employee).catch((err) => {
+      getHooks().onIngest?.(msg, response, route.employee)?.catch((err: unknown) => {
         console.error("[gateway] Pipeline conversation ingest error:", err);
       });
     } catch (err) {

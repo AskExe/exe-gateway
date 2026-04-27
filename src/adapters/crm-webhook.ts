@@ -12,13 +12,36 @@
  * @module crm-webhook
  */
 
-import {
-  processCRMEvent,
-  type CRMEvent,
-  type Trigger,
-  type TriggerFireLog,
-  type ActionExecutor,
-} from "@askexenow/exe-os/dist/automation/trigger-engine.js";
+import { getHooks } from "../hooks.js";
+
+// Local types — match exe-os trigger-engine shapes for standalone use
+interface CRMEvent {
+  eventType: string;
+  objectType: string;
+  record: Record<string, unknown>;
+}
+
+interface Trigger {
+  id: string;
+  name: string;
+  eventType: string;
+  objectType: string;
+  conditions?: Record<string, unknown>;
+  actions: Array<{ type: string; config: Record<string, unknown> }>;
+}
+
+interface TriggerFireLog {
+  triggerId: string;
+  triggerName: string;
+  eventType: string;
+  objectType: string;
+  firedAt: string;
+  actionsExecuted: number;
+  success: boolean;
+  error?: string;
+}
+
+type ActionExecutor = (action: { type: string; config: Record<string, unknown> }, event: CRMEvent) => Promise<void>;
 
 // ---------------------------------------------------------------------------
 // Twenty webhook payload structure
@@ -120,7 +143,10 @@ export function createCRMWebhookHandler(options?: {
     );
 
     try {
-      const logs = await processCRMEvent(event, options?.executor, options?.triggers);
+      const onCRM = getHooks().onCRMEvent;
+      const logs = onCRM
+        ? (await onCRM(event, options?.executor, options?.triggers)) as TriggerFireLog[]
+        : [];
 
       if (logs.length > 0 && options?.onFired) {
         options.onFired(logs);
