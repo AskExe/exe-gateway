@@ -226,6 +226,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
     return { connected: this.connected };
   }
 
+  /** Expose raw Baileys socket for admin API (groups, contacts, etc.) */
+  getRawSocket(): unknown {
+    return this.sock;
+  }
+
   /** Verify webhook for backward compat — no-op for Baileys */
   verifyWebhook(_mode: string, _token: string, _challenge: string): string | null {
     return null;

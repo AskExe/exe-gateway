@@ -6,6 +6,9 @@
  *   GET  /health             — server health + uptime + registered platforms
  *   POST /webhook/:platform  — incoming webhook payload for a platform
  *   GET  /webhook/whatsapp   — WhatsApp verification challenge
+ *   POST /api/send           — send outbound message via adapter
+ *   GET  /api/groups         — list WhatsApp groups
+ *   GET  /api/group/:id      — group info + recent messages
  */
 
 import {
@@ -27,9 +30,18 @@ export interface WebhookServerConfig {
 
 type PlatformHandler = (body: unknown) => Promise<void>;
 
+/** Minimal adapter interface for outbound send */
+interface OutboundAdapter {
+  platform: string;
+  sendText(channelId: string, text: string, options?: Record<string, unknown>): Promise<void>;
+  /** Baileys socket for raw API access (WhatsApp only) */
+  getRawSocket?(): unknown;
+}
+
 export class WebhookServer {
   private server: Server | null = null;
   private handlers = new Map<string, PlatformHandler>();
+  private adapters = new Map<string, OutboundAdapter>();
   private startedAt = 0;
 
   constructor(private config: WebhookServerConfig) {
@@ -44,6 +56,11 @@ export class WebhookServer {
   /** Register a handler for a platform: POST /webhook/:platform */
   onPlatform(platform: string, handler: PlatformHandler): void {
     this.handlers.set(platform, handler);
+  }
+
+  /** Register an adapter for outbound messaging: POST /api/send */
+  registerAdapter(platform: string, adapter: OutboundAdapter): void {
+    this.adapters.set(platform, adapter);
   }
 
   /** Start listening */
@@ -105,6 +122,39 @@ export class WebhookServer {
     // Webhook POST routes
     if (method === "POST" && url.startsWith("/webhook/")) {
       await this.handleWebhookPost(req, res, url);
+      return;
+    }
+
+    // --- Outbound API ---
+
+    // POST /api/send — send message via adapter
+    if (method === "POST" && url === "/api/send") {
+      if (this.config.authToken && !this.verifyAuth(req)) {
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      await this.handleApiSend(req, res);
+      return;
+    }
+
+    // GET /api/groups — list WhatsApp groups
+    if (method === "GET" && url === "/api/groups") {
+      if (this.config.authToken && !this.verifyAuth(req)) {
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      await this.handleApiGroups(res);
+      return;
+    }
+
+    // GET /api/group/:id — group info
+    if (method === "GET" && url.startsWith("/api/group/")) {
+      if (this.config.authToken && !this.verifyAuth(req)) {
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      const groupId = url.replace("/api/group/", "").split("?")[0];
+      await this.handleApiGroupInfo(res, groupId);
       return;
     }
 
@@ -204,6 +254,95 @@ export class WebhookServer {
   private verifyAuth(req: IncomingMessage): boolean {
     const authHeader = req.headers.authorization ?? "";
     return authHeader === `Bearer ${this.config.authToken}`;
+  }
+
+  // ---- Outbound API handlers ----
+
+  private async handleApiSend(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const body = (await readBody(req)) as Record<string, unknown>;
+      const platform = (body.platform as string) ?? "whatsapp";
+      const to = body.to as string;
+      const text = body.text as string;
+
+      if (!to || !text) {
+        sendJson(res, 400, { error: "Missing 'to' and/or 'text' fields" });
+        return;
+      }
+
+      const adapter = this.adapters.get(platform);
+      if (!adapter) {
+        sendJson(res, 400, { error: `No adapter for platform: ${platform}. Available: ${[...this.adapters.keys()].join(", ")}` });
+        return;
+      }
+
+      // Normalize phone number for WhatsApp JID
+      const channelId = platform === "whatsapp"
+        ? to.replace(/[^0-9]/g, "") + "@s.whatsapp.net"
+        : to;
+
+      await adapter.sendText(channelId, text);
+      sendJson(res, 200, { sent: true, platform, to: channelId });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  private async handleApiGroups(res: ServerResponse): Promise<void> {
+    try {
+      const adapter = this.adapters.get("whatsapp");
+      if (!adapter?.getRawSocket) {
+        sendJson(res, 400, { error: "WhatsApp adapter not available or no raw socket access" });
+        return;
+      }
+
+      const sock = adapter.getRawSocket() as Record<string, Function>;
+      if (!sock?.groupFetchAllParticipating) {
+        sendJson(res, 500, { error: "Baileys socket missing groupFetchAllParticipating" });
+        return;
+      }
+
+      const groups = await sock.groupFetchAllParticipating();
+      const result = Object.values(groups).map((g: any) => ({
+        id: g.id,
+        subject: g.subject,
+        owner: g.owner,
+        participants: g.participants?.length ?? 0,
+        creation: g.creation,
+      }));
+
+      sendJson(res, 200, { groups: result as unknown as Record<string, unknown>[] });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  private async handleApiGroupInfo(res: ServerResponse, groupId: string): Promise<void> {
+    try {
+      const adapter = this.adapters.get("whatsapp");
+      if (!adapter?.getRawSocket) {
+        sendJson(res, 400, { error: "WhatsApp adapter not available" });
+        return;
+      }
+
+      const sock = adapter.getRawSocket() as Record<string, Function>;
+      // Ensure group JID format
+      const jid = groupId.includes("@") ? groupId : groupId + "@g.us";
+
+      const metadata = await sock.groupMetadata(jid);
+      sendJson(res, 200, {
+        id: (metadata as any).id,
+        subject: (metadata as any).subject,
+        owner: (metadata as any).owner,
+        creation: (metadata as any).creation,
+        participants: (metadata as any).participants?.map((p: any) => ({
+          id: p.id,
+          admin: p.admin ?? null,
+        })),
+      } as unknown as Record<string, unknown>);
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
   }
 }
 

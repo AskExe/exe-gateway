@@ -96,6 +96,7 @@ async function main(): Promise<void> {
     const { WhatsAppAdapter } = await import("../adapters/whatsapp.js");
     const wa = new WhatsAppAdapter();
     server.onPlatform("whatsapp", (body) => wa.injectMessage(body));
+    server.registerAdapter("whatsapp", wa);
     gateway.registerAdapter(wa);
     platformConfigs.set("whatsapp", {
       platform: "whatsapp",
