@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { SocksProxyAgent } from "socks-proxy-agent";
 import type {
   NormalizedMessage,
   PlatformAdapter,
@@ -22,6 +23,10 @@ const INITIAL_RECONNECT_DELAY_MS = 10_000; // Start at 10s
 const MAX_RECONNECT_DELAY_MS = 300_000;   // Cap at 5 minutes
 const MAX_RECONNECT_ATTEMPTS = 10;        // Give up after 10 retries per session
 const AUTH_DIR = join(homedir(), ".exe-os", "whatsapp-auth");
+
+// SOCKS proxy for routing WhatsApp traffic through residential IP (Mac via Tailscale)
+// Without this, the VPS would need a full exit node which breaks Cloudflare → nginx routing.
+const SOCKS_PROXY_URL = process.env.WHATSAPP_PROXY_URL || "";
 
 // Baileys types — imported dynamically to avoid top-level ESM issues
 type BaileysSocket = Awaited<ReturnType<typeof import("@whiskeysockets/baileys").default>>;
@@ -54,7 +59,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
     this.abortController = new AbortController();
 
-    const sock = makeWASocket({
+    const socketOptions: Record<string, unknown> = {
       auth: {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, undefined as any),
@@ -64,7 +69,16 @@ export class WhatsAppAdapter implements PlatformAdapter {
       browser: [`exe-gateway-${this.accountName}`, "cli", "1.0"],
       syncFullHistory: true,  // Always sync — business accounts need full conversation history
       markOnlineOnConnect: false,
-    });
+    };
+
+    if (SOCKS_PROXY_URL) {
+      const agent = new SocksProxyAgent(SOCKS_PROXY_URL);
+      socketOptions.agent = agent;
+      socketOptions.fetchAgent = agent;
+      console.log(`[whatsapp:${this.accountName}] Routing through SOCKS proxy: ${SOCKS_PROXY_URL}`);
+    }
+
+    const sock = makeWASocket(socketOptions as any);
 
     this.sock = sock;
 
