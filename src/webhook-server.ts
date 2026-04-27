@@ -30,10 +30,13 @@ export interface WebhookServerConfig {
 
 type PlatformHandler = (body: unknown) => Promise<void>;
 
+import { OutboundLimiter, PLATFORM_LIMITS } from "./outbound-limiter.js";
+
 /** Minimal adapter interface for outbound send */
 interface OutboundAdapter {
   platform: string;
   sendText(channelId: string, text: string, options?: Record<string, unknown>): Promise<void>;
+  sendTyping?(channelId: string): Promise<void>;
   /** Baileys socket for raw API access (WhatsApp only) */
   getRawSocket?(): unknown;
 }
@@ -42,6 +45,7 @@ export class WebhookServer {
   private server: Server | null = null;
   private handlers = new Map<string, PlatformHandler>();
   private adapters = new Map<string, OutboundAdapter>();
+  private limiters = new Map<string, OutboundLimiter>();
   private startedAt = 0;
 
   constructor(private config: WebhookServerConfig) {
@@ -61,6 +65,7 @@ export class WebhookServer {
   /** Register an adapter for outbound messaging: POST /api/send */
   registerAdapter(platform: string, adapter: OutboundAdapter): void {
     this.adapters.set(platform, adapter);
+    this.limiters.set(platform, new OutboundLimiter(platform));
   }
 
   /** Start listening */
@@ -134,6 +139,16 @@ export class WebhookServer {
         return;
       }
       await this.handleApiSend(req, res);
+      return;
+    }
+
+    // GET /api/limits — show rate limits and stats
+    if (method === "GET" && url === "/api/limits") {
+      if (this.config.authToken && !this.verifyAuth(req)) {
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      this.handleApiLimits(res);
       return;
     }
 
@@ -264,6 +279,7 @@ export class WebhookServer {
       const platform = (body.platform as string) ?? "whatsapp";
       const to = body.to as string;
       const text = body.text as string;
+      const skipLimiter = body.urgent === true; // Emergency bypass (use sparingly)
 
       if (!to || !text) {
         sendJson(res, 400, { error: "Missing 'to' and/or 'text' fields" });
@@ -276,16 +292,52 @@ export class WebhookServer {
         return;
       }
 
+      const limiter = this.limiters.get(platform);
+
       // Normalize phone number for WhatsApp JID
       const channelId = platform === "whatsapp"
         ? to.replace(/[^0-9]/g, "") + "@s.whatsapp.net"
         : to;
 
-      await adapter.sendText(channelId, text);
-      sendJson(res, 200, { sent: true, platform, to: channelId });
+      if (limiter && !skipLimiter) {
+        // Rate-limited send with typing simulation
+        const stats = limiter.getStats();
+        await limiter.send(
+          channelId,
+          text,
+          (t) => adapter.sendText(channelId, t),
+          adapter.sendTyping ? () => adapter.sendTyping!(channelId) : undefined,
+        );
+        const newStats = limiter.getStats();
+        sendJson(res, 200, {
+          sent: true,
+          platform,
+          to: channelId,
+          rateLimited: true,
+          stats: newStats,
+        });
+      } else {
+        // Direct send (no rate limiting)
+        await adapter.sendText(channelId, text);
+        sendJson(res, 200, { sent: true, platform, to: channelId, rateLimited: false });
+      }
     } catch (err) {
-      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      const msg = err instanceof Error ? err.message : String(err);
+      const isRateLimit = msg.includes("limit reached");
+      sendJson(res, isRateLimit ? 429 : 500, { error: msg });
     }
+  }
+
+  /** GET /api/limits — show current rate limits and stats for all platforms */
+  private handleApiLimits(res: ServerResponse): void {
+    const result: Record<string, unknown> = {};
+    for (const [platform, limiter] of this.limiters) {
+      result[platform] = {
+        limits: limiter.getLimits(),
+        stats: limiter.getStats(),
+      };
+    }
+    sendJson(res, 200, result);
   }
 
   private async handleApiGroups(res: ServerResponse): Promise<void> {

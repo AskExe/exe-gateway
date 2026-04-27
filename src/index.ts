@@ -83,3 +83,6 @@ export {
   getDefaultAccount,
   type WhatsAppAccount,
 } from "./whatsapp-accounts.js";
+
+// Outbound rate limiting
+export { OutboundLimiter, PLATFORM_LIMITS, type PlatformLimits } from "./outbound-limiter.js";
