@@ -16,11 +16,52 @@ import {
 } from "./conversation-store.js";
 import { importContactFromMessage, tryCRMLink, parsePhoneFromJid } from "./contact-importer.js";
 
+// Storage filter — set via setStorageFilter() at boot from gateway.json config
+let _storageFilter: StorageFilter | null = null;
+
+export interface StorageFilter {
+  /** Only store messages from these group JIDs. Empty = no group filter. */
+  allowGroups?: string[];
+  /** Only store messages from these contact JIDs. Empty = no contact filter. */
+  allowContacts?: string[];
+  /** If true, only allowlisted sources are stored. If false/unset, everything is stored. */
+  enabled: boolean;
+}
+
+export function setStorageFilter(filter: StorageFilter): void {
+  _storageFilter = filter;
+  console.log(`[pipeline-store] Storage filter active: ${JSON.stringify(filter)}`);
+}
+
+function shouldStore(msg: NormalizedMessage): boolean {
+  if (!_storageFilter?.enabled) return true; // No filter = store everything
+
+  const groupJid = msg.chatType === "group" ? msg.channelId : null;
+
+  // If allowGroups is set, only store matching groups
+  if (_storageFilter.allowGroups?.length) {
+    if (groupJid && _storageFilter.allowGroups.includes(groupJid)) return true;
+  }
+
+  // If allowContacts is set, only store matching DM contacts
+  if (_storageFilter.allowContacts?.length) {
+    if (!groupJid && _storageFilter.allowContacts.includes(msg.senderId)) return true;
+  }
+
+  // If both lists exist and nothing matched, don't store
+  return false;
+}
+
 /**
  * Store an inbound message (before agent response).
  * Creates/updates account, contact, and thread as needed.
  */
 export async function storeInboundMessage(msg: NormalizedMessage): Promise<number> {
+  // Apply storage filter (for selective import — e.g., only specific groups)
+  if (!shouldStore(msg)) {
+    return -1; // Filtered out
+  }
+
   const pool = getPool();
 
   const accountId = await upsertAccount(

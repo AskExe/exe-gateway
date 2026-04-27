@@ -17,7 +17,7 @@ import { BotRegistry } from "../bot-registry.js";
 import { getHooks } from "../hooks.js";
 import { initPool, closePool } from "../db.js";
 import { initConversationStore, storeMessage, upsertAccount, upsertContact } from "../conversation-store.js";
-import { storeInboundMessage } from "../pipeline-store.js";
+import { storeInboundMessage, setStorageFilter } from "../pipeline-store.js";
 import type { PlatformConfig, NormalizedMessage } from "../types.js";
 
 const CONFIG_DIR = path.join(os.homedir(), ".exe-os");
@@ -30,6 +30,7 @@ interface GatewayJsonConfig {
   authToken?: string;
   whatsappVerifyToken?: string;
   database?: { host: string; port: number; user: string; password: string; database: string };
+  storageFilter?: { enabled: boolean; allowGroups?: string[]; allowContacts?: string[] };
   adapters?: Record<string, {
     enabled?: boolean;
     credentials?: Record<string, string>;
@@ -87,6 +88,11 @@ async function main(): Promise<void> {
     }
   } else {
     console.log(`[exe-gateway] No database config — running without conversation storage.`);
+  }
+
+  // Apply storage filter if configured
+  if (config.storageFilter) {
+    setStorageFilter(config.storageFilter);
   }
 
   const server = new WebhookServer({
