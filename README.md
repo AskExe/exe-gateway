@@ -273,6 +273,49 @@ Outbound messages are paced per-platform with human-like timing. These are the d
 
 Inbound messages are also rate-limited: 10 req/s per sender, 100 req/s global (sliding window).
 
+## Auto-Reply
+
+Automatic replies for incoming messages — **disabled by default**, allowlist-gated, with 8 safety gates to prevent spam.
+
+Add to `gateway.json`:
+
+```json
+{
+  "autoReply": {
+    "enabled": true,
+    "message": "Received. We'll get back to you shortly.",
+    "allowGroups": ["120363428671509944@g.us"],
+    "allowContacts": ["+16179354486"],
+    "cooldownHours": 24,
+    "dailyCap": 20,
+    "dmOnly": false
+  }
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `false` | Master switch. No replies sent unless explicitly `true`. |
+| `message` | `"Received."` | Text to send as the auto-reply. |
+| `allowGroups` | `[]` | Only reply in these group JIDs. Empty = no group replies. |
+| `allowContacts` | `[]` | Only reply to these phone numbers/JIDs. Empty = no DM replies. |
+| `cooldownHours` | `24` | Minimum hours between replies to the same contact. |
+| `dailyCap` | `20` | Maximum total auto-replies per day across all contacts. |
+| `dmOnly` | `false` | If `true`, blocks all group replies regardless of `allowGroups`. |
+
+**Safety gates (always enforced, not configurable):**
+
+1. Must be explicitly enabled (default OFF)
+2. Never replies to historical/sync messages
+3. Never replies to your own messages
+4. Never replies to empty or system messages
+5. Never replies to read receipts, reactions, or calls
+6. Only replies to allowlisted groups or contacts (must have at least one allowlist)
+7. Per-contact cooldown (default 24h)
+8. Daily cap (default 20)
+
+Auto-replies include a random 3–15 second delay and typing indicator simulation to appear human.
+
 ## Data Ingestion Adapters
 
 exe-gateway serves as the data ingestion layer for the Exe platform. It runs API adapters (cron or webhook) that pull data from clients' external systems and stage it for routing into the wiki and CRM.
