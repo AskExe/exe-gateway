@@ -26,7 +26,11 @@ interface GatewayJsonConfig {
   host?: string;
   authToken?: string;
   whatsappVerifyToken?: string;
-  adapters?: Record<string, { enabled?: boolean; credentials?: Record<string, string> }>;
+  adapters?: Record<string, {
+    enabled?: boolean;
+    credentials?: Record<string, string>;
+    accounts?: Array<{ name: string; authDir?: string; defaultAgent?: string }>;
+  }>;
 }
 
 function loadConfig(): GatewayJsonConfig {
@@ -92,18 +96,27 @@ async function main(): Promise<void> {
   // Register adapter handlers based on config
   const adapters = config.adapters ?? {};
 
-  if (adapters.whatsapp?.enabled) {
+  if (adapters.whatsapp?.enabled || adapters.whatsapp?.accounts?.length) {
     const { WhatsAppAdapter } = await import("../adapters/whatsapp.js");
-    const wa = new WhatsAppAdapter();
-    server.onPlatform("whatsapp", (body) => wa.injectMessage(body));
-    server.registerAdapter("whatsapp", wa);
-    gateway.registerAdapter(wa);
-    platformConfigs.set("whatsapp", {
-      platform: "whatsapp",
-      permissions: { canRead: true, canWrite: true, canExecute: false },
-      credentials: adapters.whatsapp.credentials ?? {},
-    });
-    console.log("[exe-gateway] WhatsApp adapter registered");
+
+    // Support both legacy single-account and new multi-account config
+    const accounts = adapters.whatsapp.accounts ?? [{ name: "default" }];
+
+    for (const account of accounts) {
+      const authDir = account.authDir ??
+        path.join(os.homedir(), ".exe-os", ".auth", `whatsapp-${account.name}`);
+
+      const wa = new WhatsAppAdapter(account.name);
+      server.onPlatform("whatsapp", (body) => wa.injectMessage(body));
+      server.registerAdapter("whatsapp", wa);
+      gateway.registerAdapter(wa);
+      platformConfigs.set(`whatsapp:${account.name}` as any, {
+        platform: "whatsapp",
+        permissions: { canRead: true, canWrite: true, canExecute: false },
+        credentials: { authDir, ...(adapters.whatsapp.credentials ?? {}) },
+      });
+      console.log(`[exe-gateway] WhatsApp account "${account.name}" registered`);
+    }
   }
 
   if (adapters.telegram?.enabled) {

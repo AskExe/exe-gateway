@@ -79,9 +79,8 @@ export { createCRMWebhookHandler, parseTwentyWebhook } from "./adapters/crm-webh
 export {
   loadAccounts as loadWhatsAppAccounts,
   getAccountByName,
-  getAccountByPhoneNumberId,
   getDefaultAccount,
-  type WhatsAppAccount,
+  type WhatsAppAccountConfig,
 } from "./whatsapp-accounts.js";
 
 // Outbound rate limiting

@@ -28,6 +28,7 @@ type BaileysSocket = Awaited<ReturnType<typeof import("@whiskeysockets/baileys")
 
 export class WhatsAppAdapter implements PlatformAdapter {
   readonly platform = "whatsapp" as const;
+  readonly accountName: string;
 
   private sock: BaileysSocket | null = null;
   private messageHandler: ((msg: NormalizedMessage) => Promise<void>) | null = null;
@@ -36,6 +37,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private authDir = AUTH_DIR;
   private reconnectAttempts = 0;
   private reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+
+  constructor(accountName = "default") {
+    this.accountName = accountName;
+  }
 
   async connect(config: PlatformConfig): Promise<void> {
     this.authDir = config.credentials.authDir ?? AUTH_DIR;
@@ -56,7 +61,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
       },
       version,
       printQRInTerminal: true,
-      browser: ["exe-os", "cli", "1.0"],
+      browser: [`exe-gateway-${this.accountName}`, "cli", "1.0"],
       syncFullHistory: true,  // Always sync — business accounts need full conversation history
       markOnlineOnConnect: false,
     });
@@ -78,16 +83,16 @@ export class WhatsAppAdapter implements PlatformAdapter {
         if (shouldReconnect && !this.abortController?.signal.aborted) {
           this.reconnectAttempts++;
           if (this.reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-            console.error(`[whatsapp] Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) exceeded. Stopping to protect account.`);
-            console.error(`[whatsapp] Manual restart required: systemctl restart exe-gateway`);
+            console.error(`[whatsapp:${this.accountName}] Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) exceeded. Stopping to protect account.`);
+            console.error(`[whatsapp:${this.accountName}] Manual restart required: systemctl restart exe-gateway`);
             return;
           }
           // Exponential backoff: 10s, 20s, 40s, 80s, 160s, 300s (capped)
           this.reconnectDelay = Math.min(this.reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
-          console.log(`[whatsapp] Connection closed (${statusCode}), reconnecting in ${Math.round(this.reconnectDelay / 1000)}s (attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+          console.log(`[whatsapp:${this.accountName}] Connection closed (${statusCode}), reconnecting in ${Math.round(this.reconnectDelay / 1000)}s (attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
           setTimeout(() => void this.connect(config), this.reconnectDelay);
         } else {
-          console.log("[whatsapp] Logged out — clear auth and re-pair");
+          console.log(`[whatsapp:${this.accountName}] Logged out — clear auth and re-pair`);
         }
       }
 
@@ -95,7 +100,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
         this.connected = true;
         this.reconnectAttempts = 0; // Reset on successful connection
         this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
-        console.log("[whatsapp] Connected via Baileys (linked device)");
+        console.log(`[whatsapp:${this.accountName}] Connected via Baileys (linked device)`);
       }
     });
 
@@ -103,7 +108,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
     sock.ev.on("messaging-history.set" as any, (data: any) => {
       const { messages = [], chats = [], contacts = [], isLatest } = data;
       console.log(
-        `[whatsapp] History sync: ${messages.length} messages, ${chats.length} chats, ${contacts.length} contacts` +
+        `[whatsapp:${this.accountName}] History sync: ${messages.length} messages, ${chats.length} chats, ${contacts.length} contacts` +
         (isLatest ? " (final batch)" : " (more coming...)"),
       );
 
@@ -115,7 +120,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
         if (normalized) {
           normalized.isHistorical = true;
           void this.messageHandler(normalized).catch((err) => {
-            console.error("[whatsapp] History message handler error:", err);
+            console.error(`[whatsapp:${this.accountName}] History message handler error:`, err);
           });
         }
       }
@@ -125,7 +130,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
         const synced = this.normalizeContactSync(contact);
         if (synced) {
           void this.messageHandler(synced).catch((err) => {
-            console.error("[whatsapp] History contact handler error:", err);
+            console.error(`[whatsapp:${this.accountName}] History contact handler error:`, err);
           });
         }
       }
@@ -142,7 +147,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
         const normalized = this.normalizeMessage(msg);
         if (normalized) {
           void this.messageHandler(normalized).catch((err) => {
-            console.error("[whatsapp] Message handler error:", err);
+            console.error(`[whatsapp:${this.accountName}] Message handler error:`, err);
           });
         }
       }
@@ -155,7 +160,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
         const receipt = this.normalizeReadReceipt(update);
         if (receipt) {
           void this.messageHandler(receipt).catch((err) => {
-            console.error("[whatsapp] Read receipt handler error:", err);
+            console.error(`[whatsapp:${this.accountName}] Read receipt handler error:`, err);
           });
         }
       }
@@ -168,7 +173,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
         const synced = this.normalizeContactSync(contact);
         if (synced) {
           void this.messageHandler(synced).catch((err) => {
-            console.error("[whatsapp] Contact sync handler error:", err);
+            console.error(`[whatsapp:${this.accountName}] Contact sync handler error:`, err);
           });
         }
       }
@@ -181,7 +186,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
         const normalized = this.normalizeGroupInfo(group);
         if (normalized) {
           void this.messageHandler(normalized).catch((err) => {
-            console.error("[whatsapp] Group handler error:", err);
+            console.error(`[whatsapp:${this.accountName}] Group handler error:`, err);
           });
         }
       }
@@ -194,7 +199,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
         const normalized = this.normalizeReaction(reaction);
         if (normalized) {
           void this.messageHandler(normalized).catch((err) => {
-            console.error("[whatsapp] Reaction handler error:", err);
+            console.error(`[whatsapp:${this.accountName}] Reaction handler error:`, err);
           });
         }
       }
@@ -207,7 +212,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
         const normalized = this.normalizeCall(call);
         if (normalized) {
           void this.messageHandler(normalized).catch((err) => {
-            console.error("[whatsapp] Call handler error:", err);
+            console.error(`[whatsapp:${this.accountName}] Call handler error:`, err);
           });
         }
       }
@@ -226,7 +231,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
           normalized.dataCategory = "history_sync";
           normalized.isHistorical = true;
           void this.messageHandler(normalized).catch((err) => {
-            console.error("[whatsapp] History sync handler error:", err);
+            console.error(`[whatsapp:${this.accountName}] History sync handler error:`, err);
           });
         }
       }

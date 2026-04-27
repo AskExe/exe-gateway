@@ -1,64 +1,67 @@
 /**
- * WhatsApp multi-account config store.
+ * WhatsApp multi-account config store (Baileys — no Business API).
  *
- * Loads accounts from ~/.exe-os/whatsapp-accounts.json.
- * Each account has its own credentials and optional default agent routing.
+ * Reads accounts from gateway.json `adapters.whatsapp.accounts[]`.
+ * Supports legacy single-account format (`adapters.whatsapp.enabled: true`).
  */
 
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-export interface WhatsAppAccount {
+export interface WhatsAppAccountConfig {
+  /** Human-readable name for this account */
   name: string;
-  phoneNumberId: string;
-  accessToken: string;
-  businessAccountId: string;
-  verifyToken: string;
+  /** Auth state directory for Baileys (default: ~/.exe-os/.auth/whatsapp-{name}) */
+  authDir?: string;
+  /** Optional: route messages from this account to a specific bot */
   defaultAgent?: string;
 }
 
-const CONFIG_PATH = join(homedir(), ".exe-os", "whatsapp-accounts.json");
-
-let cachedAccounts: WhatsAppAccount[] | null = null;
+let cachedAccounts: WhatsAppAccountConfig[] | null = null;
 
 /**
- * Load accounts from config file. Caches after first load.
- * Returns empty array if file is missing or malformed.
+ * Load accounts from a gateway config object. Caches after first load.
+ * Accepts either:
+ * - New format: `{ accounts: [{ name, authDir }] }`
+ * - Legacy format: `{ enabled: true }` (single account, name="default")
  */
-export function loadAccounts(): WhatsAppAccount[] {
+export function loadAccounts(
+  whatsappConfig?: { enabled?: boolean; accounts?: WhatsAppAccountConfig[] },
+): WhatsAppAccountConfig[] {
   if (cachedAccounts !== null) return cachedAccounts;
 
-  try {
-    const raw = readFileSync(CONFIG_PATH, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      console.warn("[whatsapp] Config is not an array, ignoring");
-      cachedAccounts = [];
-      return cachedAccounts;
-    }
-    cachedAccounts = parsed as WhatsAppAccount[];
-    return cachedAccounts;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.warn("[whatsapp] Failed to load accounts config:", (err as Error).message);
-    }
+  if (!whatsappConfig) {
     cachedAccounts = [];
     return cachedAccounts;
   }
+
+  if (whatsappConfig.accounts && whatsappConfig.accounts.length > 0) {
+    // New multi-account format — fill in default authDirs
+    cachedAccounts = whatsappConfig.accounts.map((a) => ({
+      ...a,
+      authDir: a.authDir ?? join(homedir(), ".exe-os", ".auth", `whatsapp-${a.name}`),
+    }));
+  } else if (whatsappConfig.enabled) {
+    // Legacy single-account format
+    cachedAccounts = [
+      {
+        name: "default",
+        authDir: join(homedir(), ".exe-os", ".auth", "whatsapp-default"),
+      },
+    ];
+  } else {
+    cachedAccounts = [];
+  }
+
+  return cachedAccounts;
 }
 
-export function getAccountByName(name: string): WhatsAppAccount | undefined {
-  return loadAccounts().find((a) => a.name === name);
+export function getAccountByName(name: string): WhatsAppAccountConfig | undefined {
+  return (cachedAccounts ?? []).find((a) => a.name === name);
 }
 
-export function getAccountByPhoneNumberId(phoneNumberId: string): WhatsAppAccount | undefined {
-  return loadAccounts().find((a) => a.phoneNumberId === phoneNumberId);
-}
-
-export function getDefaultAccount(): WhatsAppAccount | undefined {
-  const accounts = loadAccounts();
-  return accounts[0];
+export function getDefaultAccount(): WhatsAppAccountConfig | undefined {
+  return (cachedAccounts ?? [])[0];
 }
 
 /**
