@@ -62,10 +62,13 @@ fi
 # ── 4. Install dependencies + build ─────────────────────────────────────────
 log "Installing dependencies..."
 cd "$INSTALL_DIR"
-npm install --omit=dev
+npm install
 
 log "Building TypeScript..."
 npx tsc
+
+log "Pruning dev dependencies..."
+npm prune --omit=dev
 
 # ── 5. Create exe system user ────────────────────────────────────────────────
 if id exe &>/dev/null; then
