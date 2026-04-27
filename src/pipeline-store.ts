@@ -14,6 +14,7 @@ import {
   upsertThread,
   storeMessage,
 } from "./conversation-store.js";
+import { importContactFromMessage, tryCRMLink, parsePhoneFromJid } from "./contact-importer.js";
 
 /**
  * Store an inbound message (before agent response).
@@ -60,6 +61,18 @@ export async function storeInboundMessage(msg: NormalizedMessage): Promise<numbe
     },
     pool,
   );
+
+  // Auto-import contact + try CRM linking (fire-and-forget)
+  importContactFromMessage(msg)
+    .then((cId) => {
+      if (cId) {
+        const phone = msg.senderPhone ?? parsePhoneFromJid(msg.senderId);
+        if (phone) {
+          tryCRMLink(cId, phone).catch(() => {});
+        }
+      }
+    })
+    .catch(() => {});
 
   return messageId;
 }

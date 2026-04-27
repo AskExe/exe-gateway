@@ -109,3 +109,6 @@ export {
 
 // Pipeline store (NormalizedMessage → PostgreSQL bridge)
 export { storeInboundMessage, storeConversation } from "./pipeline-store.js";
+
+// Contact importer
+export { parsePhoneFromJid, importContactFromMessage, bulkImportContacts, tryCRMLink } from "./contact-importer.js";
