@@ -2,7 +2,7 @@
  * iMessage adapter using native macOS integration
  */
 
-import type { GatewayAdapter, InboundMessage, OutboundMessage, OutboundResult, PlatformAccount } from "@askexenow/exe-os/dist/lib/gateway-adapter.js";
+import type { GatewayAdapter, InboundMessage, OutboundMessage, OutboundResult, PlatformAccount } from "../gateway-adapter-types.js";
 
 export interface IMessageConfig {
   accountId?: string;

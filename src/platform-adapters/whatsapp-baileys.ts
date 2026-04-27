@@ -12,7 +12,7 @@ import type {
   OutboundMessage,
   OutboundResult,
   PlatformAccount,
-} from "@askexenow/exe-os/dist/lib/gateway-adapter.js";
+} from "../gateway-adapter-types.js";
 
 export interface BaileysConfig {
   authDir: string;

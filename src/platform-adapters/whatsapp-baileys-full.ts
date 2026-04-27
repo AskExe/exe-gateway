@@ -14,7 +14,7 @@ import type {
   OutboundMessage,
   OutboundResult,
   PlatformAccount,
-} from "@askexenow/exe-os/dist/lib/gateway-adapter.js";
+} from "../gateway-adapter-types.js";
 
 interface BaileysSocket {
   user?: { id: string };

@@ -12,7 +12,7 @@ export { DiscordCarbonAdapter, type CarbonConfig } from "./discord-carbon.js";
 export { SlackBoltAdapter, type BoltConfig } from "./slack-bolt.js";
 export { IMessageNativeAdapter, type IMessageConfig } from "./imessage-native.js";
 
-import type { GatewayAdapter } from "@askexenow/exe-os/dist/lib/gateway-adapter.js";
+import type { GatewayAdapter } from "../gateway-adapter-types.js";
 import { WhatsAppBaileysAdapter } from "./whatsapp-baileys.js";
 import { TelegramGrammyAdapter } from "./telegram-grammy.js";
 import { DiscordCarbonAdapter } from "./discord-carbon.js";

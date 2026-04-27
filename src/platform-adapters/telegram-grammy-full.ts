@@ -2,7 +2,7 @@
  * Telegram adapter using Grammy — FULL IMPLEMENTATION
  */
 
-import type { GatewayAdapter, InboundMessage, OutboundMessage, OutboundResult, PlatformAccount } from "@askexenow/exe-os/dist/lib/gateway-adapter.js";
+import type { GatewayAdapter, InboundMessage, OutboundMessage, OutboundResult, PlatformAccount } from "../gateway-adapter-types.js";
 
 export class TelegramGrammyFullAdapter implements GatewayAdapter {
   readonly platform = "telegram" as const;

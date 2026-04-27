@@ -2,7 +2,7 @@
  * Slack adapter using @slack/bolt — FULL IMPLEMENTATION
  */
 
-import type { GatewayAdapter, InboundMessage, OutboundMessage, OutboundResult, PlatformAccount } from "@askexenow/exe-os/dist/lib/gateway-adapter.js";
+import type { GatewayAdapter, InboundMessage, OutboundMessage, OutboundResult, PlatformAccount } from "../gateway-adapter-types.js";
 
 export class SlackBoltFullAdapter implements GatewayAdapter {
   readonly platform = "slack" as const;

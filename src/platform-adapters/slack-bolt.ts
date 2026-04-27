@@ -2,7 +2,7 @@
  * Slack adapter using @slack/bolt
  */
 
-import type { GatewayAdapter, InboundMessage, OutboundMessage, OutboundResult, PlatformAccount } from "@askexenow/exe-os/dist/lib/gateway-adapter.js";
+import type { GatewayAdapter, InboundMessage, OutboundMessage, OutboundResult, PlatformAccount } from "../gateway-adapter-types.js";
 
 export interface BoltConfig {
   botToken: string;
