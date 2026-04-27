@@ -44,6 +44,25 @@ export interface GatewayOptions {
   alertMonitor?: AlertMonitor;
   rateLimiter?: RateLimiter;
   customerStore?: CustomerStore;
+  autoReply?: AutoReplyConfig;
+}
+
+/** Auto-reply configuration — OFF by default, allowlist-gated */
+export interface AutoReplyConfig {
+  /** Master switch. Default: false. Must be true for any auto-reply. */
+  enabled: boolean;
+  /** Message text to send. Default: "Received." */
+  message?: string;
+  /** Only auto-reply in these specific groups. Empty = no group replies. */
+  allowGroups?: string[];
+  /** Only auto-reply to these specific contacts (phone or JID). Empty = no DM replies. */
+  allowContacts?: string[];
+  /** Hours between replies to same contact. Default: 24 */
+  cooldownHours?: number;
+  /** Max total auto-replies per day. Default: 20 */
+  dailyCap?: number;
+  /** Only reply to DMs, never groups (overrides allowGroups). Default: false */
+  dmOnly?: boolean;
 }
 
 export class Gateway {
@@ -59,14 +78,24 @@ export class Gateway {
   private customerStore?: CustomerStore;
   private startedAt = 0;
 
-  // Auto-reply safety: track who we've replied to and how many total
-  private autoReplyLog = new Map<string, number>(); // senderId → last reply timestamp
+  // Auto-reply: configurable via GatewayOptions, OFF by default
+  private autoReplyLog = new Map<string, number>();
   private autoReplyCount = 0;
-  private static readonly AUTO_REPLY_COOLDOWN_MS = 86_400_000; // 1 reply per contact per 24h
-  private static readonly AUTO_REPLY_DAILY_CAP = 20; // max 20 auto-replies per day total
-  private static readonly AUTO_REPLY_ENABLED = false; // DISABLED by default — opt-in via config
+  private autoReplyConfig: AutoReplyConfig = { enabled: false };
 
   constructor(options: GatewayOptions) {
+    if (options.autoReply) {
+      this.autoReplyConfig = { ...this.autoReplyConfig, ...options.autoReply };
+      if (this.autoReplyConfig.enabled) {
+        const groups = this.autoReplyConfig.allowGroups?.length ?? 0;
+        const contacts = this.autoReplyConfig.allowContacts?.length ?? 0;
+        console.log(
+          `[gateway] Auto-reply ON: "${this.autoReplyConfig.message ?? "Received."}" ` +
+          `(${groups} groups, ${contacts} contacts, cap=${this.autoReplyConfig.dailyCap ?? 20}/day, ` +
+          `cooldown=${this.autoReplyConfig.cooldownHours ?? 24}h)`
+        );
+      }
+    }
     this.config = options.config;
     this.platformConfigs = options.platformConfigs;
     this.botRegistry = options.botRegistry;
@@ -184,12 +213,13 @@ export class Gateway {
         const adapter = this.resolveAdapter(msg);
         if (adapter) {
           const delaySec = 3 + Math.random() * 12;
-          console.log(`[gateway] Auto-reply "Received." to DM from ${msg.senderId} in ${delaySec.toFixed(1)}s`);
+          const replyMsg = this.autoReplyConfig.message ?? "Received.";
+          console.log(`[gateway] Auto-reply "${replyMsg}" to ${msg.senderId} in ${delaySec.toFixed(1)}s`);
           setTimeout(async () => {
             try {
               await adapter.sendTyping(msg.channelId);
               await new Promise(r => setTimeout(r, 500 + Math.random() * 1500));
-              await adapter.sendText(msg.channelId, "Received.");
+              await adapter.sendText(msg.channelId, replyMsg);
               this.autoReplyLog.set(msg.senderId, Date.now());
               this.autoReplyCount++;
             } catch (err) {
@@ -293,45 +323,68 @@ export class Gateway {
    * This prevents the 1,582-message spam incident from 2026-04-27.
    */
   private checkAutoReplySafety(msg: NormalizedMessage): boolean {
+    const cfg = this.autoReplyConfig;
+
     // GATE 1: Auto-reply must be explicitly enabled (default: OFF)
-    if (!Gateway.AUTO_REPLY_ENABLED) {
+    if (!cfg.enabled) {
       return false;
     }
 
-    // GATE 2: NEVER reply to group messages
-    if (msg.chatType === "group") {
-      return false;
-    }
-
-    // GATE 3: NEVER reply to historical/sync messages
+    // GATE 2: NEVER reply to historical/sync messages
     if (msg.isHistorical) {
       return false;
     }
 
-    // GATE 4: NEVER reply to our own messages
+    // GATE 3: NEVER reply to our own messages
     if ((msg as any).key?.fromMe || msg.senderId === "status@broadcast") {
       return false;
     }
 
-    // GATE 5: NEVER reply to system messages (no text)
+    // GATE 4: NEVER reply to system messages (no text)
     if (!msg.text || msg.text.trim().length === 0) {
       return false;
     }
 
-    // GATE 6: Rate limit — max 1 reply per contact per 24 hours
-    const lastReply = this.autoReplyLog.get(msg.senderId);
-    if (lastReply && Date.now() - lastReply < Gateway.AUTO_REPLY_COOLDOWN_MS) {
-      return false;
-    }
-
-    // GATE 7: Daily cap — max 20 auto-replies total per day
-    if (this.autoReplyCount >= Gateway.AUTO_REPLY_DAILY_CAP) {
-      console.warn(`[gateway] Auto-reply daily cap reached (${Gateway.AUTO_REPLY_DAILY_CAP}). No more auto-replies today.`);
-      return false;
-    }
-
-    // GATE 8: Skip read receipts, reactions, calls, contact cards, etc.
+    // GATE 5: Skip read receipts, reactions, calls, contact cards, etc.
     if (msg.dataCategory && msg.dataCategory !== "message") {
+      return false;
+    }
+
+    // GATE 6: Group vs DM allowlist check
+    const isGroup = msg.chatType === "group";
+    if (isGroup) {
+      // dmOnly blocks ALL groups regardless of allowlist
+      if (cfg.dmOnly) return false;
+      // Only reply in explicitly allowlisted groups
+      if (!cfg.allowGroups?.length || !cfg.allowGroups.includes(msg.channelId)) {
+        return false;
+      }
+    } else {
+      // DM — only reply to explicitly allowlisted contacts (if list exists)
+      if (cfg.allowContacts?.length) {
+        const phoneMatch = cfg.allowContacts.some(c =>
+          msg.senderId.includes(c.replace(/[^0-9]/g, "")) || c === msg.senderId
+        );
+        if (!phoneMatch) return false;
+      }
+      // If no allowContacts list AND no allowGroups list, block everything
+      // (must have at least one allowlist to send ANY replies)
+      if (!cfg.allowContacts?.length && !cfg.allowGroups?.length) {
+        return false;
+      }
+    }
+
+    // GATE 7: Rate limit — cooldown per contact
+    const cooldownMs = (cfg.cooldownHours ?? 24) * 3_600_000;
+    const lastReply = this.autoReplyLog.get(msg.senderId);
+    if (lastReply && Date.now() - lastReply < cooldownMs) {
+      return false;
+    }
+
+    // GATE 8: Daily cap
+    const dailyCap = cfg.dailyCap ?? 20;
+    if (this.autoReplyCount >= dailyCap) {
+      console.warn(`[gateway] Auto-reply daily cap reached (${dailyCap}). No more today.`);
       return false;
     }
 

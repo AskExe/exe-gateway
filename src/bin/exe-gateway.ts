@@ -31,6 +31,15 @@ interface GatewayJsonConfig {
   whatsappVerifyToken?: string;
   database?: { host: string; port: number; user: string; password: string; database: string };
   storageFilter?: { enabled: boolean; allowGroups?: string[]; allowContacts?: string[] };
+  autoReply?: {
+    enabled: boolean;
+    message?: string;
+    allowGroups?: string[];
+    allowContacts?: string[];
+    cooldownHours?: number;
+    dailyCap?: number;
+    dmOnly?: boolean;
+  };
   adapters?: Record<string, {
     enabled?: boolean;
     credentials?: Record<string, string>;
@@ -115,6 +124,7 @@ async function main(): Promise<void> {
     },
     platformConfigs,
     botRegistry,
+    autoReply: config.autoReply,
   });
 
   // Register adapter handlers based on config
