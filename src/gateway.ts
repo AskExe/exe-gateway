@@ -170,10 +170,22 @@ export class Gateway {
     // 4. Bot registry lookup
     const bot = this.botRegistry.get(route.employee);
     if (!bot) {
-      console.error(`[gateway] No bot registered for target: ${route.employee}`);
+      // No bot configured — send "Received." with random human-like delay
       const adapter = this.resolveAdapter(msg);
       if (adapter) {
-        await adapter.sendText(msg.channelId, "Sorry, I'm not available right now.");
+        const delaySec = 3 + Math.random() * 12; // 3-15 seconds random
+        console.log(`[gateway] No bot for ${route.employee} — auto-reply "Received." in ${delaySec.toFixed(1)}s`);
+        setTimeout(async () => {
+          try {
+            // Typing indicator first
+            await adapter.sendTyping(msg.channelId);
+            // Wait for realistic typing duration (0.5-2s for a short word)
+            await new Promise(r => setTimeout(r, 500 + Math.random() * 1500));
+            await adapter.sendText(msg.channelId, "Received.");
+          } catch (err) {
+            console.error(`[gateway] Auto-reply failed:`, err instanceof Error ? err.message : err);
+          }
+        }, delaySec * 1000);
       }
       return;
     }
