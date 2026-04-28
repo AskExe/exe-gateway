@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { createConnection } from "node:net";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import type {
   NormalizedMessage,
@@ -19,9 +20,10 @@ import type {
   DataCategory,
 } from "../types.js";
 
-const INITIAL_RECONNECT_DELAY_MS = 10_000; // Start at 10s
-const MAX_RECONNECT_DELAY_MS = 300_000;   // Cap at 5 minutes
-const MAX_RECONNECT_ATTEMPTS = 10;        // Give up after 10 retries per session
+const INITIAL_RECONNECT_DELAY_MS = 5_000;  // Start at 5s
+const MAX_RECONNECT_DELAY_MS = 300_000;    // Cap at 5 minutes
+const PROXY_DOWN_INTERVAL_MS = 600_000;    // 10 minutes when proxy unreachable
+const PROXY_HEALTH_TIMEOUT_MS = 5_000;     // 5s TCP connect timeout
 const AUTH_DIR = join(homedir(), ".exe-os", "whatsapp-auth");
 
 // SOCKS proxy for routing WhatsApp traffic through residential IP (Mac via Tailscale)
@@ -41,7 +43,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private abortController: AbortController | null = null;
   private authDir = AUTH_DIR;
   private reconnectAttempts = 0;
-  private reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+  private lastConnectedAt: Date | null = null;
+  private proxyReachable = true;
 
   constructor(accountName = "default") {
     this.accountName = accountName;
@@ -96,15 +99,19 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
         if (shouldReconnect && !this.abortController?.signal.aborted) {
           this.reconnectAttempts++;
-          if (this.reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-            console.error(`[whatsapp:${this.accountName}] Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) exceeded. Stopping to protect account.`);
-            console.error(`[whatsapp:${this.accountName}] Manual restart required: systemctl restart exe-gateway`);
-            return;
+
+          // Periodic status log every 10 attempts
+          if (this.reconnectAttempts % 10 === 0) {
+            const offlineMs = this.lastConnectedAt
+              ? Date.now() - this.lastConnectedAt.getTime()
+              : 0;
+            const offlineHours = (offlineMs / 3_600_000).toFixed(1);
+            console.log(
+              `[whatsapp:${this.accountName}] Offline for ${offlineHours}h, ${this.reconnectAttempts} attempts, proxy: ${this.proxyReachable ? "up" : "down"}`,
+            );
           }
-          // Exponential backoff: 10s, 20s, 40s, 80s, 160s, 300s (capped)
-          this.reconnectDelay = Math.min(this.reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
-          console.log(`[whatsapp:${this.accountName}] Connection closed (${statusCode}), reconnecting in ${Math.round(this.reconnectDelay / 1000)}s (attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
-          setTimeout(() => void this.connect(config), this.reconnectDelay);
+
+          void this.reconnectWithProxyCheck(config);
         } else {
           console.log(`[whatsapp:${this.accountName}] Logged out — clear auth and re-pair`);
         }
@@ -112,8 +119,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
       if (connection === "open") {
         this.connected = true;
-        this.reconnectAttempts = 0; // Reset on successful connection
-        this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+        this.lastConnectedAt = new Date();
+        this.reconnectAttempts = 0;
+        this.proxyReachable = true;
         console.log(`[whatsapp:${this.accountName}] Connected via Baileys (linked device)`);
       }
     });
@@ -289,6 +297,89 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   async healthCheck(): Promise<{ connected: boolean; latencyMs?: number }> {
     return { connected: this.connected };
+  }
+
+  getHealthStatus(): {
+    connected: boolean;
+    lastConnectedAt: Date | null;
+    reconnectAttempts: number;
+    proxyReachable: boolean;
+  } {
+    return {
+      connected: this.connected,
+      lastConnectedAt: this.lastConnectedAt,
+      reconnectAttempts: this.reconnectAttempts,
+      proxyReachable: this.proxyReachable,
+    };
+  }
+
+  private async reconnectWithProxyCheck(config: PlatformConfig): Promise<void> {
+    // If SOCKS proxy is configured, check if it's reachable before reconnecting
+    if (SOCKS_PROXY_URL) {
+      const reachable = await this.checkProxyHealth();
+      this.proxyReachable = reachable;
+
+      if (!reachable) {
+        console.log(
+          `[whatsapp:${this.accountName}] SOCKS proxy unreachable, waiting for recovery...`,
+        );
+        // Back off to 10-minute intervals while proxy is down
+        const timer = setInterval(async () => {
+          if (this.abortController?.signal.aborted) {
+            clearInterval(timer);
+            return;
+          }
+          const recovered = await this.checkProxyHealth();
+          if (recovered) {
+            clearInterval(timer);
+            this.proxyReachable = true;
+            console.log(
+              `[whatsapp:${this.accountName}] SOCKS proxy recovered, reconnecting immediately...`,
+            );
+            this.reconnectAttempts = 0;
+            void this.connect(config);
+          }
+        }, PROXY_DOWN_INTERVAL_MS);
+        return;
+      }
+    }
+
+    // Exponential backoff: 5s, 10s, 20s, 40s, 80s, 160s, 300s (capped)
+    const delay = Math.min(
+      INITIAL_RECONNECT_DELAY_MS *
+        Math.pow(2, Math.min(this.reconnectAttempts, 6)),
+      MAX_RECONNECT_DELAY_MS,
+    );
+    console.log(
+      `[whatsapp:${this.accountName}] Connection closed, reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts})`,
+    );
+    setTimeout(() => void this.connect(config), delay);
+  }
+
+  private checkProxyHealth(): Promise<boolean> {
+    return new Promise((resolve) => {
+      try {
+        const url = new URL(SOCKS_PROXY_URL);
+        const host = url.hostname;
+        const port = parseInt(url.port, 10) || 1080;
+
+        const socket = createConnection({ host, port, timeout: PROXY_HEALTH_TIMEOUT_MS });
+        socket.once("connect", () => {
+          socket.destroy();
+          resolve(true);
+        });
+        socket.once("timeout", () => {
+          socket.destroy();
+          resolve(false);
+        });
+        socket.once("error", () => {
+          socket.destroy();
+          resolve(false);
+        });
+      } catch {
+        resolve(false);
+      }
+    });
   }
 
   /** Expose raw Baileys socket for admin API (groups, contacts, etc.) */
