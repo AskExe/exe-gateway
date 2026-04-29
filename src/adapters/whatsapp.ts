@@ -69,7 +69,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
       },
       version,
       printQRInTerminal: true,
-      browser: [`exe-gateway-${this.accountName}`, "cli", "1.0"],
+      browser: ["Chrome", "Chrome", "130.0.0"],  // Blend in — real Chrome linked-device fingerprint
       syncFullHistory: true,  // Always sync — business accounts need full conversation history
       markOnlineOnConnect: false,
     };

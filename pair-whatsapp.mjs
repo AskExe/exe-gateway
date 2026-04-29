@@ -90,7 +90,7 @@ async function pair() {
     },
     version,
     printQRInTerminal: false,
-    browser: [`exe-gateway-${accountName}`, "cli", "1.0"],
+    browser: ["Chrome", "Chrome", "130.0.0"],  // Blend in — real Chrome linked-device fingerprint
     markOnlineOnConnect: false,
   });
 
