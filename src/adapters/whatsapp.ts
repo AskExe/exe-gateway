@@ -26,9 +26,9 @@ const PROXY_DOWN_INTERVAL_MS = 600_000;    // 10 minutes when proxy unreachable
 const PROXY_HEALTH_TIMEOUT_MS = 5_000;     // 5s TCP connect timeout
 const AUTH_DIR = join(homedir(), ".exe-os", "whatsapp-auth");
 
-// SOCKS proxy for routing WhatsApp traffic through residential IP (Mac via Tailscale)
-// Without this, the VPS would need a full exit node which breaks Cloudflare → nginx routing.
-const SOCKS_PROXY_URL = process.env.WHATSAPP_PROXY_URL || "";
+// SOCKS proxy for routing WhatsApp traffic through residential IP.
+// Per-account proxy (credentials.proxy) overrides this global fallback.
+const GLOBAL_SOCKS_PROXY_URL = process.env.WHATSAPP_PROXY_URL || "";
 
 // Baileys types — imported dynamically to avoid top-level ESM issues
 type BaileysSocket = Awaited<ReturnType<typeof import("@whiskeysockets/baileys").default>>;
@@ -45,6 +45,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private reconnectAttempts = 0;
   private lastConnectedAt: Date | null = null;
   private proxyReachable = true;
+  /** Resolved proxy URL for this account (per-account or global fallback) */
+  private proxyUrl = "";
 
   constructor(accountName = "default") {
     this.accountName = accountName;
@@ -53,6 +55,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
   async connect(config: PlatformConfig): Promise<void> {
     this.authDir = config.credentials.authDir ?? AUTH_DIR;
     mkdirSync(this.authDir, { recursive: true });
+
+    // Resolve proxy: per-account → global env → none
+    this.proxyUrl = config.credentials.proxy || GLOBAL_SOCKS_PROXY_URL;
 
     const baileys = await import("@whiskeysockets/baileys");
     const { makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, makeCacheableSignalKeyStore } = baileys;
@@ -74,11 +79,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
       markOnlineOnConnect: false,
     };
 
-    if (SOCKS_PROXY_URL) {
-      const agent = new SocksProxyAgent(SOCKS_PROXY_URL);
+    if (this.proxyUrl) {
+      const agent = new SocksProxyAgent(this.proxyUrl);
       socketOptions.agent = agent;
       socketOptions.fetchAgent = agent;
-      console.log(`[whatsapp:${this.accountName}] Routing through SOCKS proxy: ${SOCKS_PROXY_URL}`);
+      console.log(`[whatsapp:${this.accountName}] Routing through SOCKS proxy: ${this.proxyUrl}`);
     }
 
     const sock = makeWASocket(socketOptions as any);
@@ -315,7 +320,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   private async reconnectWithProxyCheck(config: PlatformConfig): Promise<void> {
     // If SOCKS proxy is configured, check if it's reachable before reconnecting
-    if (SOCKS_PROXY_URL) {
+    if (this.proxyUrl) {
       const reachable = await this.checkProxyHealth();
       this.proxyReachable = reachable;
 
@@ -359,7 +364,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private checkProxyHealth(): Promise<boolean> {
     return new Promise((resolve) => {
       try {
-        const url = new URL(SOCKS_PROXY_URL);
+        const url = new URL(this.proxyUrl);
         const host = url.hostname;
         const port = parseInt(url.port, 10) || 1080;
 

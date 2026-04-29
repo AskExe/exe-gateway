@@ -19,22 +19,22 @@
     "whatsapp": {
       "enabled": true,
       "accounts": [
-        { "name": "ro-1",  "readOnly": true },
-        { "name": "ro-2",  "readOnly": true },
-        { "name": "ro-3",  "readOnly": true },
-        { "name": "ro-4",  "readOnly": true },
-        { "name": "ro-5",  "readOnly": true },
-        { "name": "ro-6",  "readOnly": true },
-        { "name": "ro-7",  "readOnly": true },
-        { "name": "ro-8",  "readOnly": true },
-        { "name": "ro-9",  "readOnly": true },
-        { "name": "ro-10", "readOnly": true },
+        { "name": "ro-1",  "readOnly": true, "proxy": "socks5://user:pass@proxy-1.example.com:1080" },
+        { "name": "ro-2",  "readOnly": true, "proxy": "socks5://user:pass@proxy-1.example.com:1080" },
+        { "name": "ro-3",  "readOnly": true, "proxy": "socks5://user:pass@proxy-1.example.com:1080" },
+        { "name": "ro-4",  "readOnly": true, "proxy": "socks5://user:pass@proxy-2.example.com:1080" },
+        { "name": "ro-5",  "readOnly": true, "proxy": "socks5://user:pass@proxy-2.example.com:1080" },
+        { "name": "ro-6",  "readOnly": true, "proxy": "socks5://user:pass@proxy-2.example.com:1080" },
+        { "name": "ro-7",  "readOnly": true, "proxy": "socks5://user:pass@proxy-3.example.com:1080" },
+        { "name": "ro-8",  "readOnly": true, "proxy": "socks5://user:pass@proxy-3.example.com:1080" },
+        { "name": "ro-9",  "readOnly": true, "proxy": "socks5://user:pass@proxy-3.example.com:1080" },
+        { "name": "ro-10", "readOnly": true, "proxy": "socks5://user:pass@proxy-4.example.com:1080" },
 
-        { "name": "send-1" },
-        { "name": "send-2" },
-        { "name": "send-3" },
-        { "name": "send-4" },
-        { "name": "send-5" }
+        { "name": "send-1", "proxy": "socks5://user:pass@proxy-4.example.com:1080" },
+        { "name": "send-2", "proxy": "socks5://user:pass@proxy-4.example.com:1080" },
+        { "name": "send-3", "proxy": "socks5://user:pass@proxy-5.example.com:1080" },
+        { "name": "send-4", "proxy": "socks5://user:pass@proxy-5.example.com:1080" },
+        { "name": "send-5", "proxy": "socks5://user:pass@proxy-5.example.com:1080" }
       ]
     }
   },

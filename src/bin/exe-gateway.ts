@@ -49,7 +49,7 @@ interface GatewayJsonConfig {
   adapters?: Record<string, {
     enabled?: boolean;
     credentials?: Record<string, string>;
-    accounts?: Array<{ name: string; authDir?: string; defaultAgent?: string; readOnly?: boolean }>;
+    accounts?: Array<{ name: string; authDir?: string; defaultAgent?: string; readOnly?: boolean; proxy?: string }>;
   }>;
 }
 
@@ -162,9 +162,10 @@ async function main(): Promise<void> {
       platformConfigs.set(`whatsapp:${account.name}` as any, {
         platform: "whatsapp",
         permissions: { canRead: true, canWrite: !isReadOnly, canExecute: false },
-        credentials: { authDir, ...(adapters.whatsapp.credentials ?? {}) },
+        credentials: { authDir, ...(account.proxy ? { proxy: account.proxy } : {}), ...(adapters.whatsapp.credentials ?? {}) },
       });
-      console.log(`[exe-gateway] WhatsApp account "${account.name}" registered (${isReadOnly ? "read-only" : "read-write"})`);
+      const proxyLabel = account.proxy ? ` proxy=${new URL(account.proxy).hostname}` : "";
+      console.log(`[exe-gateway] WhatsApp account "${account.name}" registered (${isReadOnly ? "read-only" : "read-write"}${proxyLabel})`);
     }
   }
 
