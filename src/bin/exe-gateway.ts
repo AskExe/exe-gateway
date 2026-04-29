@@ -49,6 +49,8 @@ interface GatewayJsonConfig {
   adapters?: Record<string, {
     enabled?: boolean;
     credentials?: Record<string, string>;
+    /** Default SOCKS proxy for all accounts. Per-account `proxy` overrides this. */
+    proxy?: string;
     accounts?: Array<{ name: string; authDir?: string; defaultAgent?: string; readOnly?: boolean; proxy?: string }>;
   }>;
 }
@@ -155,6 +157,9 @@ async function main(): Promise<void> {
       // Per-account read-only: global readOnly overrides, otherwise check account-level flag
       const isReadOnly = config.readOnly || account.readOnly === true;
 
+      // Proxy resolution: per-account → adapter-level → env var → none
+      const proxy = account.proxy || adapters.whatsapp.proxy || "";
+
       const wa = new WhatsAppAdapter(account.name);
       server.onPlatform("whatsapp", (body) => wa.injectMessage(body));
       server.registerAdapter("whatsapp", wa);
@@ -162,9 +167,9 @@ async function main(): Promise<void> {
       platformConfigs.set(`whatsapp:${account.name}` as any, {
         platform: "whatsapp",
         permissions: { canRead: true, canWrite: !isReadOnly, canExecute: false },
-        credentials: { authDir, ...(account.proxy ? { proxy: account.proxy } : {}), ...(adapters.whatsapp.credentials ?? {}) },
+        credentials: { authDir, ...(proxy ? { proxy } : {}), ...(adapters.whatsapp.credentials ?? {}) },
       });
-      const proxyLabel = account.proxy ? ` proxy=${new URL(account.proxy).hostname}` : "";
+      const proxyLabel = proxy ? ` proxy=${new URL(proxy).hostname}` : "";
       console.log(`[exe-gateway] WhatsApp account "${account.name}" registered (${isReadOnly ? "read-only" : "read-write"}${proxyLabel})`);
     }
   }
