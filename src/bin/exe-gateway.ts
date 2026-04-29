@@ -29,6 +29,12 @@ interface GatewayJsonConfig {
   host?: string;
   authToken?: string;
   whatsappVerifyToken?: string;
+  /**
+   * Read-only ingestion mode. Receives and stores all messages but sends nothing.
+   * No auto-reply, no typing indicators, no bot responses, no /api/send.
+   * Use for background conversation monitoring — zero bot footprint.
+   */
+  readOnly?: boolean;
   database?: { host: string; port: number; user: string; password: string; database: string };
   storageFilter?: { enabled: boolean; allowGroups?: string[]; allowContacts?: string[] };
   autoReply?: {
@@ -111,6 +117,11 @@ async function main(): Promise<void> {
     whatsappVerifyToken: config.whatsappVerifyToken,
   });
 
+  // Read-only mode gate — suppress all outbound at server + gateway level
+  if (config.readOnly) {
+    server.setReadOnly(true);
+  }
+
   // Build Gateway orchestrator (message routing, bot processing, responses)
   const platformConfigs = new Map<string, PlatformConfig>();
   const botRegistry = new BotRegistry();
@@ -125,6 +136,7 @@ async function main(): Promise<void> {
     platformConfigs,
     botRegistry,
     autoReply: config.autoReply,
+    readOnly: config.readOnly,
   });
 
   // Register adapter handlers based on config

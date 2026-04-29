@@ -45,6 +45,15 @@ export interface GatewayOptions {
   rateLimiter?: RateLimiter;
   customerStore?: CustomerStore;
   autoReply?: AutoReplyConfig;
+  /**
+   * Read-only ingestion mode. When true:
+   * - Messages are received and stored to Postgres (ingest continues)
+   * - NO outbound messages, typing indicators, read receipts, or bot responses
+   * - Auto-reply is force-disabled regardless of config
+   * - POST /api/send is rejected
+   * - Zero bot footprint — pure background observer
+   */
+  readOnly?: boolean;
 }
 
 /** Auto-reply configuration — OFF by default, allowlist-gated */
@@ -83,8 +92,17 @@ export class Gateway {
   private autoReplyCount = 0;
   private autoReplyConfig: AutoReplyConfig = { enabled: false };
 
+  /** Read-only mode: ingest only, zero outbound signals */
+  private readOnly = false;
+
   constructor(options: GatewayOptions) {
-    if (options.autoReply) {
+    this.readOnly = options.readOnly ?? false;
+
+    if (this.readOnly) {
+      // Force-disable auto-reply in read-only mode — no outbound messages ever
+      this.autoReplyConfig = { enabled: false };
+      console.log(`[gateway] READ-ONLY mode — ingesting messages, all outbound suppressed`);
+    } else if (options.autoReply) {
       this.autoReplyConfig = { ...this.autoReplyConfig, ...options.autoReply };
       if (this.autoReplyConfig.enabled) {
         const groups = this.autoReplyConfig.allowGroups?.length ?? 0;
@@ -105,6 +123,11 @@ export class Gateway {
     this.alertMonitor = options.alertMonitor;
     this.failover = options.failover;
     this.customerStore = options.customerStore;
+  }
+
+  /** Whether the gateway is in read-only ingestion mode */
+  get isReadOnly(): boolean {
+    return this.readOnly;
   }
 
   registerAdapter(adapter: PlatformAdapter): void {
@@ -158,6 +181,32 @@ export class Gateway {
 
   private async handleMessage(msg: NormalizedMessage): Promise<void> {
     const start = Date.now();
+
+    // ── READ-ONLY FAST PATH ──────────────────────────────────────────────
+    // Ingest to all sinks, then STOP. No outbound signals of any kind.
+    if (this.readOnly) {
+      // Customer identity resolution (local only, no network)
+      this.customerStore?.resolve(msg.platform, msg.senderId);
+
+      // Pipeline ingest — fan out to CRM, memory, wiki, conversation store
+      getHooks().onIngest?.(msg)?.catch((err: unknown) => {
+        console.error("[gateway] Pipeline inbound ingest error:", err);
+      });
+
+      // Store in PostgreSQL
+      try {
+        const { storeInboundMessage } = await import("./pipeline-store.js");
+        storeInboundMessage(msg).catch((err: unknown) => {
+          console.error("[gateway] PostgreSQL store error:", err);
+        });
+      } catch {
+        // pipeline-store not available — silent
+      }
+
+      return; // Hard stop — nothing below fires in read-only mode
+    }
+
+    // ── NORMAL PATH ──────────────────────────────────────────────────────
 
     // 1. Rate limit check
     if (this.rateLimiter) {

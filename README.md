@@ -316,6 +316,37 @@ Add to `gateway.json`:
 
 Auto-replies include a random 3–15 second delay and typing indicator simulation to appear human.
 
+## Read-Only Mode
+
+Background conversation monitoring — receives and stores all messages with zero bot footprint. No auto-reply, no typing indicators, no read receipts, no outbound sends.
+
+Add to `gateway.json`:
+
+```json
+{
+  "readOnly": true,
+  "database": { "host": "...", "port": 5432, "user": "...", "password": "...", "database": "..." }
+}
+```
+
+What happens in read-only mode:
+
+| Behavior | Status |
+|----------|--------|
+| Receive messages | ✅ Normal |
+| Store to PostgreSQL | ✅ Normal |
+| Pipeline ingest (CRM, contacts) | ✅ Normal |
+| History sync | ✅ Normal |
+| Auto-reply | 🔴 Force disabled |
+| Bot responses | 🔴 Suppressed |
+| Typing indicators | 🔴 Suppressed |
+| POST /api/send | 🔴 Rejected (403) |
+| Online presence | 🔴 Already off (`markOnlineOnConnect: false`) |
+
+The `/health` endpoint shows `"mode": "read-only"` when active.
+
+Combine with `storageFilter` to selectively ingest only specific groups/contacts.
+
 ## Data Ingestion Adapters
 
 exe-gateway serves as the data ingestion layer for the Exe platform. It runs API adapters (cron or webhook) that pull data from clients' external systems and stage it for routing into the wiki and CRM.

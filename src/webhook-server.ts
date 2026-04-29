@@ -47,6 +47,12 @@ export class WebhookServer {
   private adapters = new Map<string, OutboundAdapter>();
   private limiters = new Map<string, OutboundLimiter>();
   private startedAt = 0;
+  private _readOnly = false;
+
+  /** Enable read-only mode — rejects all outbound sends via /api/send */
+  setReadOnly(enabled: boolean): void {
+    this._readOnly = enabled;
+  }
 
   constructor(private config: WebhookServerConfig) {
     if (process.env.NODE_ENV === "production" && !config.authToken) {
@@ -222,6 +228,7 @@ export class WebhookServer {
     const uptime = this.startedAt > 0 ? Date.now() - this.startedAt : 0;
     sendJson(res, 200, {
       status: "ok",
+      mode: this._readOnly ? "read-only" : "normal",
       uptime,
       handlers: [...this.handlers.keys()],
     });
@@ -317,6 +324,12 @@ export class WebhookServer {
 
   private async handleApiSend(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
+      // Read-only gate — no outbound sends allowed
+      if (this._readOnly) {
+        sendJson(res, 403, { error: "Gateway is in read-only mode. Outbound sends are disabled." });
+        return;
+      }
+
       const body = (await readBody(req)) as Record<string, unknown>;
       const platform = (body.platform as string) ?? "whatsapp";
       const to = body.to as string;
@@ -336,9 +349,9 @@ export class WebhookServer {
 
       const limiter = this.limiters.get(platform);
 
-      // Normalize phone number for WhatsApp JID
+      // Normalize to WhatsApp JID — preserve group (@g.us) and broadcast (@broadcast) suffixes
       const channelId = platform === "whatsapp"
-        ? to.replace(/[^0-9]/g, "") + "@s.whatsapp.net"
+        ? (to.includes("@") ? to : to.replace(/[^0-9]/g, "") + "@s.whatsapp.net")
         : to;
 
       if (limiter && !skipLimiter) {
