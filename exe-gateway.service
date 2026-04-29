@@ -8,11 +8,17 @@
 #
 # Logs:
 #   journalctl -u exe-gateway -f
+#
+# Memory sizing (per WhatsApp account):
+#   ~40 MB steady-state (WebSocket + Signal keys + auth)
+#   ~200 MB spike during initial history sync (temporary)
+#   15 accounts × 40 MB = 600 MB steady + GC overhead ≈ 2 GB safe
+#   Scale: 100 accounts ≈ 8 GB, adjust MemoryMax accordingly
 
 [Unit]
 Description=exe-gateway — webhook server + WebSocket relay
 Documentation=https://askexe.com
-After=network-online.target
+After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
@@ -23,8 +29,9 @@ Group=exe
 # Working directory where exe-gateway is installed
 WorkingDirectory=/opt/exe-gateway
 
-# Entry point — compiled gateway binary
-ExecStart=/usr/bin/node /opt/exe-gateway/dist/bin/exe-gateway.js
+# Entry point — Node.js heap sized for multi-account connections
+# 15 accounts: 2 GB heap covers steady-state + history sync spikes + GC
+ExecStart=/usr/bin/node --max-old-space-size=2048 /opt/exe-gateway/dist/bin/exe-gateway.js
 
 # Restart policy — always restart with 5s backoff
 Restart=always
@@ -50,9 +57,10 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 
-# Resource limits
+# Resource limits — sized for 15 WhatsApp accounts (10 read-only + 5 sending)
+# Bump to 8G for ~100 accounts, 16G for ~200 accounts
 LimitNOFILE=65536
-MemoryMax=512M
+MemoryMax=3G
 
 [Install]
 WantedBy=multi-user.target

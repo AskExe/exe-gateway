@@ -1,0 +1,45 @@
+{
+  "port": 3100,
+  "host": "127.0.0.1",
+  "authToken": "CHANGE_ME_random_secret_token",
+
+  "database": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "user": "exe_gateway",
+    "password": "CHANGE_ME",
+    "database": "exe_gateway"
+  },
+
+  "storageFilter": {
+    "enabled": false
+  },
+
+  "adapters": {
+    "whatsapp": {
+      "enabled": true,
+      "accounts": [
+        { "name": "ro-1",  "readOnly": true },
+        { "name": "ro-2",  "readOnly": true },
+        { "name": "ro-3",  "readOnly": true },
+        { "name": "ro-4",  "readOnly": true },
+        { "name": "ro-5",  "readOnly": true },
+        { "name": "ro-6",  "readOnly": true },
+        { "name": "ro-7",  "readOnly": true },
+        { "name": "ro-8",  "readOnly": true },
+        { "name": "ro-9",  "readOnly": true },
+        { "name": "ro-10", "readOnly": true },
+
+        { "name": "send-1" },
+        { "name": "send-2" },
+        { "name": "send-3" },
+        { "name": "send-4" },
+        { "name": "send-5" }
+      ]
+    }
+  },
+
+  "autoReply": {
+    "enabled": false
+  }
+}

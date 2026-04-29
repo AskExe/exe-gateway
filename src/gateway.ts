@@ -179,12 +179,26 @@ export class Gateway {
     console.log("[gateway] Stopped");
   }
 
+  /** Check if a specific account is in read-only mode */
+  private isAccountReadOnly(msg: NormalizedMessage): boolean {
+    // Global read-only overrides everything
+    if (this.readOnly) return true;
+
+    // Per-account: check platformConfig permissions
+    const key = `${msg.platform}:${msg.accountId ?? "default"}`;
+    const config = this.platformConfigs.get(key);
+    if (config && !config.permissions.canWrite) return true;
+
+    return false;
+  }
+
   private async handleMessage(msg: NormalizedMessage): Promise<void> {
     const start = Date.now();
 
     // ── READ-ONLY FAST PATH ──────────────────────────────────────────────
     // Ingest to all sinks, then STOP. No outbound signals of any kind.
-    if (this.readOnly) {
+    // Applies when: global readOnly=true OR per-account canWrite=false.
+    if (this.isAccountReadOnly(msg)) {
       // Customer identity resolution (local only, no network)
       this.customerStore?.resolve(msg.platform, msg.senderId);
 

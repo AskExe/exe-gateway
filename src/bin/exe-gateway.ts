@@ -49,7 +49,7 @@ interface GatewayJsonConfig {
   adapters?: Record<string, {
     enabled?: boolean;
     credentials?: Record<string, string>;
-    accounts?: Array<{ name: string; authDir?: string; defaultAgent?: string }>;
+    accounts?: Array<{ name: string; authDir?: string; defaultAgent?: string; readOnly?: boolean }>;
   }>;
 }
 
@@ -152,16 +152,19 @@ async function main(): Promise<void> {
       const authDir = account.authDir ??
         path.join(os.homedir(), ".exe-os", ".auth", `whatsapp-${account.name}`);
 
+      // Per-account read-only: global readOnly overrides, otherwise check account-level flag
+      const isReadOnly = config.readOnly || account.readOnly === true;
+
       const wa = new WhatsAppAdapter(account.name);
       server.onPlatform("whatsapp", (body) => wa.injectMessage(body));
       server.registerAdapter("whatsapp", wa);
       gateway.registerAdapter(wa);
       platformConfigs.set(`whatsapp:${account.name}` as any, {
         platform: "whatsapp",
-        permissions: { canRead: true, canWrite: true, canExecute: false },
+        permissions: { canRead: true, canWrite: !isReadOnly, canExecute: false },
         credentials: { authDir, ...(adapters.whatsapp.credentials ?? {}) },
       });
-      console.log(`[exe-gateway] WhatsApp account "${account.name}" registered`);
+      console.log(`[exe-gateway] WhatsApp account "${account.name}" registered (${isReadOnly ? "read-only" : "read-write"})`);
     }
   }
 
@@ -169,13 +172,14 @@ async function main(): Promise<void> {
     const { TelegramAdapter } = await import("../adapters/telegram.js");
     const accounts = adapters.telegram.accounts ?? [{ name: "default" }];
     for (const account of accounts) {
+      const { readOnly: _ro, ...accountCreds } = account;
       const telegram = new TelegramAdapter(account.name);
       server.onPlatform("telegram", (body) => telegram.injectMessage(body));
       gateway.registerAdapter(telegram);
       platformConfigs.set(`telegram:${account.name}`, {
         platform: "telegram",
         permissions: { canRead: true, canWrite: true, canExecute: false },
-        credentials: { ...account, ...(adapters.telegram.credentials ?? {}) },
+        credentials: { ...accountCreds, ...(adapters.telegram.credentials ?? {}) },
       });
       console.log(`[exe-gateway] Telegram account "${account.name}" registered`);
     }
@@ -185,13 +189,14 @@ async function main(): Promise<void> {
     const { DiscordAdapter } = await import("../adapters/discord.js");
     const accounts = adapters.discord.accounts ?? [{ name: "default" }];
     for (const account of accounts) {
+      const { readOnly: _ro, ...accountCreds } = account;
       const discord = new DiscordAdapter(account.name);
       server.onPlatform("discord", (body) => discord.injectMessage(body));
       gateway.registerAdapter(discord);
       platformConfigs.set(`discord:${account.name}`, {
         platform: "discord",
         permissions: { canRead: true, canWrite: true, canExecute: false },
-        credentials: { ...account, ...(adapters.discord.credentials ?? {}) },
+        credentials: { ...accountCreds, ...(adapters.discord.credentials ?? {}) },
       });
       console.log(`[exe-gateway] Discord account "${account.name}" registered`);
     }
@@ -201,13 +206,14 @@ async function main(): Promise<void> {
     const { SlackAdapter } = await import("../adapters/slack.js");
     const accounts = adapters.slack.accounts ?? [{ name: "default" }];
     for (const account of accounts) {
+      const { readOnly: _ro, ...accountCreds } = account;
       const slack = new SlackAdapter(account.name);
       server.onPlatform("slack", (body) => slack.injectMessage(body));
       gateway.registerAdapter(slack);
       platformConfigs.set(`slack:${account.name}`, {
         platform: "slack",
         permissions: { canRead: true, canWrite: true, canExecute: false },
-        credentials: { ...account, ...(adapters.slack.credentials ?? {}) },
+        credentials: { ...accountCreds, ...(adapters.slack.credentials ?? {}) },
       });
       console.log(`[exe-gateway] Slack account "${account.name}" registered`);
     }
@@ -230,13 +236,14 @@ async function main(): Promise<void> {
     const { EmailAdapter } = await import("../adapters/email.js");
     const accounts = adapters.email.accounts ?? [{ name: "default" }];
     for (const account of accounts) {
+      const { readOnly: _ro, ...accountCreds } = account;
       const email = new EmailAdapter(account.name);
       server.onPlatform("email", (body) => email.injectMessage(body));
       gateway.registerAdapter(email);
       platformConfigs.set(`email:${account.name}`, {
         platform: "email",
         permissions: { canRead: true, canWrite: true, canExecute: false },
-        credentials: { ...account, ...(adapters.email.credentials ?? {}) },
+        credentials: { ...accountCreds, ...(adapters.email.credentials ?? {}) },
       });
       console.log(`[exe-gateway] Email account "${account.name}" registered`);
     }
