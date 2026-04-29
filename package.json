@@ -1,6 +1,6 @@
 {
   "name": "@askexenow/exe-gateway",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Standalone webhook server + messaging gateway for multi-platform bot deployment",
   "type": "module",
   "main": "dist/gateway.js",
