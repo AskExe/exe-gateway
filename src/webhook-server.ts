@@ -9,6 +9,8 @@
  *   POST /api/send           — send outbound message via adapter
  *   GET  /api/groups         — list WhatsApp groups
  *   GET  /api/group/:id      — group info + recent messages
+ *   POST /v1/messages        — LLM proxy (Anthropic Messages API compatible)
+ *   GET  /v1/usage/:customer — usage summary for a customer
  */
 
 import {
@@ -31,6 +33,8 @@ export interface WebhookServerConfig {
 type PlatformHandler = (body: unknown) => Promise<void>;
 
 import { OutboundLimiter, PLATFORM_LIMITS } from "./outbound-limiter.js";
+import { handleProxyRequest, type LLMProxyConfig } from "./llm-proxy.js";
+import { getUsageSummary } from "./metering.js";
 
 /** Minimal adapter interface for outbound send */
 interface OutboundAdapter {
@@ -49,6 +53,7 @@ export class WebhookServer {
   private startedAt = 0;
   private _readOnly = false;
   private _dbAvailable = false;
+  private proxyConfig: LLMProxyConfig | null = null;
 
   /** Enable read-only mode — rejects all outbound sends via /api/send */
   setReadOnly(enabled: boolean): void {
@@ -58,6 +63,14 @@ export class WebhookServer {
   /** Mark conversation storage as available (called after successful DB init) */
   setDbAvailable(available: boolean): void {
     this._dbAvailable = available;
+  }
+
+  /** Enable LLM proxy at /v1/messages */
+  setProxyConfig(config: LLMProxyConfig): void {
+    this.proxyConfig = config;
+    console.log(
+      `[webhook-server] LLM proxy enabled at /v1/messages (margin: ${config.marginPercent}%)`,
+    );
   }
 
   constructor(private config: WebhookServerConfig) {
@@ -123,6 +136,30 @@ export class WebhookServer {
   ): Promise<void> {
     const url = req.url ?? "/";
     const method = req.method ?? "GET";
+
+    // ---- LLM Proxy routes (before auth — proxy has its own auth via exe_sk_*) ----
+
+    // POST /v1/messages — Anthropic Messages API proxy
+    if (method === "POST" && url === "/v1/messages") {
+      if (!this.proxyConfig) {
+        sendJson(res, 404, { error: "LLM proxy not configured" });
+        return;
+      }
+      await handleProxyRequest(req, res, this.proxyConfig);
+      return;
+    }
+
+    // GET /v1/usage/:customerId — usage summary (admin auth required)
+    if (method === "GET" && url.startsWith("/v1/usage/")) {
+      if (this.config.authToken && !this.verifyAuth(req)) {
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      await this.handleUsageSummary(req, res, url);
+      return;
+    }
+
+    // ---- Standard routes ----
 
     // Health endpoint
     if (method === "GET" && url === "/health") {
@@ -235,6 +272,7 @@ export class WebhookServer {
     sendJson(res, 200, {
       status: "ok",
       mode: this._readOnly ? "read-only" : "normal",
+      llmProxy: this.proxyConfig ? "enabled" : "disabled",
       uptime,
       handlers: [...this.handlers.keys()],
     });
@@ -324,6 +362,35 @@ export class WebhookServer {
   private verifyAuth(req: IncomingMessage): boolean {
     const authHeader = req.headers.authorization ?? "";
     return authHeader === `Bearer ${this.config.authToken}`;
+  }
+
+  // ---- LLM Proxy admin handlers ----
+
+  private async handleUsageSummary(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    url: string,
+  ): Promise<void> {
+    if (!this._dbAvailable) {
+      sendJson(res, 503, { error: "Database unavailable" });
+      return;
+    }
+    try {
+      const customerId = url.replace("/v1/usage/", "").split("?")[0];
+      if (!customerId) {
+        sendJson(res, 400, { error: "Missing customer_id in path" });
+        return;
+      }
+      const params = parseQuery(url);
+      const days = parseInt(params.days ?? "30", 10);
+      const since = new Date(Date.now() - days * 86_400_000);
+      const summary = await getUsageSummary(customerId, since);
+      sendJson(res, 200, summary as unknown as Record<string, unknown>);
+    } catch (err) {
+      sendJson(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // ---- Outbound API handlers ----
