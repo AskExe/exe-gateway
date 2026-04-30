@@ -17,6 +17,7 @@ import { BotRegistry } from "../bot-registry.js";
 import { getHooks } from "../hooks.js";
 import { initPool, closePool } from "../db.js";
 import { initConversationStore, storeMessage, upsertAccount, upsertContact } from "../conversation-store.js";
+import { initAnalyticsStore } from "../analytics.js";
 import { storeInboundMessage, setStorageFilter } from "../pipeline-store.js";
 import type { PlatformConfig, NormalizedMessage } from "../types.js";
 
@@ -37,6 +38,14 @@ interface GatewayJsonConfig {
   readOnly?: boolean;
   database?: { host: string; port: number; user: string; password: string; database: string };
   storageFilter?: { enabled: boolean; allowGroups?: string[]; allowContacts?: string[] };
+  /** LLM proxy configuration — enables POST /v1/messages */
+  llmProxy?: {
+    enabled: boolean;
+    /** Master Anthropic API key. Falls back to ANTHROPIC_API_KEY env var. */
+    anthropicApiKey?: string;
+    /** Margin percentage on top of cost (default 20) */
+    marginPercent?: number;
+  };
   autoReply?: {
     enabled: boolean;
     message?: string;
@@ -99,6 +108,7 @@ async function main(): Promise<void> {
     try {
       initPool(config.database);
       await initConversationStore();
+      await initAnalyticsStore();
       dbReady = true;
       console.log(`[exe-gateway] PostgreSQL connected (${config.database.host}:${config.database.port}/${config.database.database})`);
     } catch (err) {
@@ -107,6 +117,22 @@ async function main(): Promise<void> {
     }
   } else {
     console.log(`[exe-gateway] No database config — running without conversation storage.`);
+  }
+
+  // Initialize LLM proxy tables + config if enabled
+  if (config.llmProxy?.enabled && dbReady) {
+    try {
+      const { initApiKeysTable } = await import("../api-keys.js");
+      const { initUsageTable } = await import("../metering.js");
+      await initApiKeysTable();
+      await initUsageTable();
+      console.log("[exe-gateway] LLM proxy tables initialized");
+    } catch (err) {
+      console.error(
+        "[exe-gateway] LLM proxy table init failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   // Apply storage filter if configured
@@ -124,6 +150,28 @@ async function main(): Promise<void> {
   // Mark DB as available for conversation read endpoints
   if (dbReady) {
     server.setDbAvailable(true);
+  }
+
+  // Enable LLM proxy if configured
+  if (config.llmProxy?.enabled) {
+    const anthropicApiKey =
+      config.llmProxy.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY;
+    if (!anthropicApiKey) {
+      console.error(
+        "[exe-gateway] LLM proxy enabled but no Anthropic API key. " +
+          "Set llmProxy.anthropicApiKey in gateway.json or ANTHROPIC_API_KEY env var.",
+      );
+    } else if (!dbReady) {
+      console.error(
+        "[exe-gateway] LLM proxy requires database for metering. " +
+          "Configure database section in gateway.json.",
+      );
+    } else {
+      server.setProxyConfig({
+        anthropicApiKey,
+        marginPercent: config.llmProxy.marginPercent ?? 20,
+      });
+    }
   }
 
   // Read-only mode gate — suppress all outbound at server + gateway level

@@ -61,7 +61,7 @@ export { RateLimiter } from "./rate-limiter.js";
 export { CircuitBreaker, retryWithBackoff } from "./reliability.js";
 export { FailoverCascade, FailoverExhaustedError } from "./failover.js";
 export { SessionStore } from "./session-store.js";
-export { AnalyticsCollector } from "./analytics.js";
+export { AnalyticsCollector, initAnalyticsStore } from "./analytics.js";
 export { AlertMonitor, formatAlert } from "./alerts.js";
 export { CustomerStore } from "./customer-store.js";
 
@@ -95,6 +95,26 @@ export { OutboundLimiter, PLATFORM_LIMITS, type PlatformLimits } from "./outboun
 
 // Database
 export { initPool, getPool, closePool, type DBConfig } from "./db.js";
+
+// LLM Proxy
+export { handleProxyRequest, type LLMProxyConfig } from "./llm-proxy.js";
+export {
+  validateApiKey,
+  createApiKey,
+  revokeApiKey,
+  listApiKeys,
+  initApiKeysTable,
+  type CustomerInfo,
+} from "./api-keys.js";
+export {
+  logUsage,
+  calculateCost,
+  getUsageSummary,
+  getDailyUsage,
+  initUsageTable,
+  type UsageEntry,
+  type UsageSummary,
+} from "./metering.js";
 
 // Conversation store (PostgreSQL)
 export {

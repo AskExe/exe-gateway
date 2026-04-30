@@ -1,6 +1,6 @@
 /**
  * WhatsApp adapter using Baileys — FULL IMPLEMENTATION
- * 
+ *
  * Handles:
  * - QR code authentication with persistent session
  * - Inbound message monitoring with debouncing
@@ -31,11 +31,17 @@ export class WhatsAppBaileysFullAdapter implements GatewayAdapter {
   private messageHandlers: Set<(msg: InboundMessage) => Promise<void>> = new Set();
   private debounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private debounceMs: number;
+  private messageListener: ((update: any) => void) | null = null;
 
   constructor(config: { authDir: string; accountId?: string; debounceMs?: number }) {
     this._authDir = config.authDir;
     this.accountId = config.accountId || "default";
     this.debounceMs = config.debounceMs || 0;
+  }
+
+  /** Inject an externally-created Baileys socket (from pair-whatsapp or session manager) */
+  setSocket(socket: BaileysSocket): void {
+    this.socket = socket;
   }
 
   async listAccounts(): Promise<PlatformAccount[]> {
@@ -97,29 +103,46 @@ export class WhatsAppBaileysFullAdapter implements GatewayAdapter {
     this.messageHandlers.add(onMessage);
     const debounceMs = options?.debounceMs ?? this.debounceMs;
 
-    const _handleMessage = async (update: any) => {
+    const handleMessage = async (update: any) => {
       if (!update.messages) return;
 
       for (const message of update.messages) {
+        // Skip status messages and own messages
+        if (message.key?.fromMe) continue;
+
         const inboundMsg = this.parseInboundMessage(message);
         if (!inboundMsg) continue;
 
         if (debounceMs > 0) {
           this.debounceMessage(inboundMsg, onMessage, debounceMs);
         } else {
-          await onMessage(inboundMsg);
+          await onMessage(inboundMsg).catch((err) => {
+            console.error("[whatsapp-baileys] Message handler error:", err);
+          });
         }
       }
     };
 
-    // TODO: Wire up Baileys socket event listener
-    // this.socket?.ev.on("messages.upsert", _handleMessage);
-    void _handleMessage;
+    this.messageListener = handleMessage;
+
+    // Wire up Baileys socket event listener
+    if (this.socket) {
+      this.socket.ev.on("messages.upsert", handleMessage);
+    }
 
     return async () => {
       this.isMonitoring = false;
       this.messageHandlers.delete(onMessage);
-      // TODO: Remove event listener
+      // Remove event listener
+      if (this.socket && this.messageListener) {
+        this.socket.ev.off("messages.upsert", this.messageListener);
+        this.messageListener = null;
+      }
+      // Clear pending debounce timers
+      for (const timer of this.debounceTimers.values()) {
+        clearTimeout(timer);
+      }
+      this.debounceTimers.clear();
     };
   }
 
@@ -149,8 +172,9 @@ export class WhatsAppBaileysFullAdapter implements GatewayAdapter {
 
   private buildMessage(msg: OutboundMessage): any {
     if (msg.content.mediaUrl) {
+      const mediaType = msg.content.mediaType || "image";
       return {
-        image: { url: msg.content.mediaUrl },
+        [mediaType]: { url: msg.content.mediaUrl },
         caption: msg.content.text || "",
       };
     }
@@ -160,8 +184,11 @@ export class WhatsAppBaileysFullAdapter implements GatewayAdapter {
   private parseInboundMessage(raw: any): InboundMessage | null {
     if (!raw.message) return null;
 
-    const text = raw.message.conversation || raw.message.extendedTextMessage?.text || "";
-    const from = raw.key.remoteJid?.replace("@s.whatsapp.net", "") || "";
+    const text = raw.message.conversation
+      || raw.message.extendedTextMessage?.text
+      || raw.message.imageMessage?.caption
+      || "";
+    const from = raw.key.remoteJid?.replace("@s.whatsapp.net", "").replace("@g.us", "") || "";
     const chatType = raw.key.remoteJid?.includes("@g.us") ? "group" : "direct";
 
     return {
@@ -171,7 +198,8 @@ export class WhatsAppBaileysFullAdapter implements GatewayAdapter {
       to: this.socket?.user?.id?.replace("@s.whatsapp.net", "") || "",
       content: { text },
       timestamp: (raw.messageTimestamp || 0) * 1000,
-      chatType: chatType as any,
+      chatType: chatType as "direct" | "group",
+      senderName: raw.pushName,
     };
   }
 
@@ -185,7 +213,7 @@ export class WhatsAppBaileysFullAdapter implements GatewayAdapter {
     if (existing) clearTimeout(existing);
 
     const timer = setTimeout(() => {
-      handler(msg).catch((err) => console.error("Message handler error:", err));
+      handler(msg).catch((err) => console.error("[whatsapp-baileys] Debounced handler error:", err));
       this.debounceTimers.delete(key);
     }, delayMs);
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   FailoverCascade,
   FailoverExhaustedError,
@@ -9,6 +9,7 @@ import {
 function makeProvider(name: string, overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   return {
     name,
+    providerId: "anthropic",
     baseUrl: `https://${name}.example.com`,
     apiKey: `key-${name}`,
     models: { haiku: `${name}-haiku`, sonnet: `${name}-sonnet`, opus: `${name}-opus` },
@@ -54,6 +55,14 @@ describe("FailoverCascade", () => {
     cascade.resetAll();
     const health = cascade.getProviderHealth();
     expect(health.every((h) => h.state === "closed")).toBe(true);
+  });
+
+  it("initializes with openai provider type", () => {
+    const config = makeConfig([makeProvider("gpt4", { providerId: "openai" })]);
+    const cascade = new FailoverCascade(config);
+    const health = cascade.getProviderHealth();
+    expect(health).toHaveLength(1);
+    expect(health[0]!.name).toBe("gpt4");
   });
 });
 

@@ -1,17 +1,25 @@
 /**
  * Multi-provider failover cascade.
  *
- * Tries providers in order per config.failoverChain (default: Anthropic → OpenCode → Gemini → OpenAI → Chutes).
- * Integrates with Phase 2's circuit breaker to skip degraded providers.
+ * Tries providers in order per config.failoverChain using the LLMProvider interface.
+ * Integrates with the circuit breaker to skip degraded providers.
  * Per-tier behavior controls how aggressively we failover.
+ *
+ * Model-agnostic — works with any LLMProvider (Anthropic, OpenAI, Ollama, etc.)
  */
 
-import Anthropic from "@anthropic-ai/sdk";
 import { CircuitBreaker, retryWithBackoff } from "./reliability.js";
+import type {
+  LLMProvider,
+  NormalizedMessageParams,
+  NormalizedResponse,
+} from "./providers/types.js";
+import { createProvider, type FactoryProviderId } from "./providers/factory.js";
 
 export interface ProviderConfig {
   name: string;
-  baseUrl: string;
+  providerId: FactoryProviderId;
+  baseUrl?: string;
   apiKey: string;
   models: {
     haiku: string;
@@ -43,7 +51,7 @@ export const DEFAULT_FAILOVER_CONFIG: FailoverConfig = {
 };
 
 export interface FailoverResult {
-  response: Anthropic.Message;
+  response: NormalizedResponse;
   provider: string;
   latencyMs: number;
   failedProviders: string[];
@@ -52,7 +60,7 @@ export interface FailoverResult {
 export class FailoverCascade {
   private config: FailoverConfig;
   private breakers = new Map<string, CircuitBreaker>();
-  private clients = new Map<string, Anthropic>();
+  private llmProviders = new Map<string, LLMProvider>();
 
   constructor(config: FailoverConfig) {
     this.config = config;
@@ -66,11 +74,12 @@ export class FailoverCascade {
           halfOpenAfterMs: 30_000,
         }),
       );
-      this.clients.set(
+      this.llmProviders.set(
         provider.name,
-        new Anthropic({
+        createProvider({
+          providerId: provider.providerId,
+          model: provider.models.sonnet,
           apiKey: provider.apiKey,
-          baseURL: provider.baseUrl || undefined,
         }),
       );
     }
@@ -81,7 +90,7 @@ export class FailoverCascade {
    * Tries providers in order, respecting circuit breakers and tier limits.
    */
   async execute(
-    params: Omit<Anthropic.MessageCreateParamsNonStreaming, "model"> & {
+    params: Omit<NormalizedMessageParams, "model"> & {
       modelTier: "haiku" | "sonnet" | "opus";
     },
     tier: FailoverTier = "standard",
@@ -96,7 +105,7 @@ export class FailoverCascade {
     for (let i = 0; i < maxProviders; i++) {
       const provider = this.config.providers[i]!;
       const breaker = this.breakers.get(provider.name)!;
-      const client = this.clients.get(provider.name)!;
+      const llm = this.llmProviders.get(provider.name)!;
 
       if (!breaker.canRequest()) {
         failedProviders.push(provider.name);
@@ -110,12 +119,9 @@ export class FailoverCascade {
         const response = await retryWithBackoff(
           () =>
             Promise.race([
-              client.messages.create({
-                ...params,
-                model,
-              }),
+              llm.createMessage({ ...params, model }),
               rejectAfter(tierConfig.timeoutMs, provider.name),
-            ]) as Promise<Anthropic.Message>,
+            ]),
           { maxRetries: 1, baseDelayMs: 500, maxDelayMs: 2000 },
         );
 
