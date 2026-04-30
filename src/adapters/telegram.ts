@@ -22,6 +22,8 @@ export class TelegramAdapter implements PlatformAdapter {
   private bot: any = null; // Grammy Bot instance — dynamic import
   private messageHandler: ((msg: NormalizedMessage) => Promise<void>) | null = null;
   private connected = false;
+  private polling = false;
+  private pollOffset = 0;
 
   constructor(accountName = "default") {
     this.accountName = accountName;
@@ -36,62 +38,57 @@ export class TelegramAdapter implements PlatformAdapter {
     const { Bot } = await import("grammy");
     this.bot = new Bot(botToken);
 
-    // Register message handler
-    this.bot.on("message", async (ctx: any) => {
-      if (!this.messageHandler) return;
+    // Initialize bot info (needed for API calls)
+    await this.bot.init();
 
-      const msg = ctx.message;
-      if (!msg?.chat) return;
+    // Clear any existing webhook so getUpdates works
+    await this.bot.api.deleteWebhook();
 
-      const text = msg.text ?? msg.caption ?? "";
-      const chat = msg.chat;
-      const isGroup = chat.type === "group" || chat.type === "supergroup";
-      const senderId = String(msg.from?.id ?? "");
+    // Start manual polling — process-then-ack pattern
+    // (grammy's bot.start() acks offsets before handler completion)
+    this.polling = true;
+    this.connected = true;
+    console.log(`[telegram:${this.accountName}] Connected via polling (safe ack)`);
+    void this.pollLoop();
+  }
 
-      const media = this.extractMedia(msg);
-
-      const normalized: NormalizedMessage = {
-        messageId: String(msg.message_id),
-        platform: "telegram",
-        senderId,
-        senderName: [msg.from?.first_name, msg.from?.last_name]
-          .filter(Boolean)
-          .join(" ") || undefined,
-        channelId: String(chat.id),
-        chatType: isGroup ? "group" : "direct",
-        text,
-        timestamp: new Date((msg.date ?? 0) * 1000).toISOString(),
-        media,
-        replyTo: msg.reply_to_message
-          ? {
-              messageId: String(msg.reply_to_message.message_id),
-              text: msg.reply_to_message.text ?? "",
-              senderId: String(msg.reply_to_message.from?.id ?? ""),
-            }
-          : undefined,
-        threadId: msg.message_thread_id ? String(msg.message_thread_id) : undefined,
-        raw: msg,
-      };
-
+  /**
+   * Manual getUpdates loop. Advances offset only AFTER each update
+   * is successfully processed through the pipeline — if processing
+   * fails, the update is re-delivered on the next poll.
+   */
+  private async pollLoop(): Promise<void> {
+    while (this.polling) {
       try {
-        await this.messageHandler(normalized);
-      } catch (err) {
-        console.error(`[telegram:${this.accountName}] Message handler error:`, err);
-      }
-    });
+        const updates = await this.bot.api.getUpdates({
+          offset: this.pollOffset,
+          timeout: 30,
+          allowed_updates: ["message", "edited_message"],
+        });
 
-    // Start long polling
-    this.bot.start({
-      onStart: () => {
-        this.connected = true;
-        console.log(`[telegram:${this.accountName}] Connected via grammy (long polling)`);
-      },
-    });
+        for (const update of updates) {
+          const msg = (update as any).message ?? (update as any).edited_message;
+          if (msg?.chat && this.messageHandler) {
+            const normalized = this.normalizeMessage(msg, update);
+            await this.messageHandler(normalized);
+          }
+          // Advance offset AFTER successful processing
+          this.pollOffset = update.update_id + 1;
+        }
+      } catch (err) {
+        if (!this.polling) break;
+        console.error(
+          `[telegram:${this.accountName}] Poll error:`,
+          err instanceof Error ? err.message : err,
+        );
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
   }
 
   async disconnect(): Promise<void> {
+    this.polling = false;
     if (this.bot) {
-      await this.bot.stop();
       this.bot = null;
     }
     this.connected = false;
@@ -144,14 +141,23 @@ export class TelegramAdapter implements PlatformAdapter {
     const msg = update.message ?? update.edited_message;
     if (!msg?.chat) return;
 
-    const text = msg.text ?? msg.caption ?? "";
+    const normalized = this.normalizeMessage(msg, rawPayload);
+
+    try {
+      await this.messageHandler(normalized);
+    } catch (err) {
+      console.error(`[telegram:${this.accountName}] injectMessage handler error:`, err);
+    }
+  }
+
+  /** Normalize a Telegram message into the gateway's common format */
+  private normalizeMessage(msg: any, raw: unknown): NormalizedMessage {
     const chat = msg.chat;
     const isGroup = chat.type === "group" || chat.type === "supergroup";
     const senderId = String(msg.from?.id ?? "");
-
     const media = this.extractMedia(msg);
 
-    const normalized: NormalizedMessage = {
+    return {
       messageId: String(msg.message_id),
       platform: "telegram",
       senderId,
@@ -160,7 +166,7 @@ export class TelegramAdapter implements PlatformAdapter {
         .join(" ") || undefined,
       channelId: String(chat.id),
       chatType: isGroup ? "group" : "direct",
-      text,
+      text: msg.text ?? msg.caption ?? "",
       timestamp: new Date((msg.date ?? 0) * 1000).toISOString(),
       media,
       replyTo: msg.reply_to_message
@@ -171,14 +177,8 @@ export class TelegramAdapter implements PlatformAdapter {
           }
         : undefined,
       threadId: msg.message_thread_id ? String(msg.message_thread_id) : undefined,
-      raw: rawPayload,
+      raw,
     };
-
-    try {
-      await this.messageHandler(normalized);
-    } catch (err) {
-      console.error(`[telegram:${this.accountName}] injectMessage handler error:`, err);
-    }
   }
 
   private extractMedia(msg: any): NormalizedMessage["media"] {
