@@ -22,7 +22,7 @@ import { WebhookServer } from "../src/webhook-server.js";
 // Setup
 // ---------------------------------------------------------------------------
 
-const PORT = 19876;
+const PORT = 19878; // Different from webhook-server + ws-relay tests to avoid EADDRINUSE
 const AUTH_TOKEN = "test-token-secret";
 let server: WebhookServer;
 
@@ -35,7 +35,8 @@ async function apiGet(path: string, token?: string): Promise<{ status: number; b
 }
 
 beforeAll(async () => {
-  server = new WebhookServer({ port: PORT, authToken: AUTH_TOKEN });
+  server = new WebhookServer({ port: PORT, host: "127.0.0.1", authToken: AUTH_TOKEN });
+  server.setDbAvailable(true);
   await server.start();
 });
 

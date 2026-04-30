@@ -94,14 +94,16 @@ async function main(): Promise<void> {
   const port = config.port ?? DEFAULT_PORT;
 
   // Initialize PostgreSQL if database config is present
+  let dbReady = false;
   if (config.database) {
     try {
       initPool(config.database);
       await initConversationStore();
+      dbReady = true;
       console.log(`[exe-gateway] PostgreSQL connected (${config.database.host}:${config.database.port}/${config.database.database})`);
     } catch (err) {
       console.error(`[exe-gateway] PostgreSQL init failed:`, err instanceof Error ? err.message : err);
-      console.error(`[exe-gateway] Continuing without conversation storage.`);
+      console.warn(`[exe-gateway] \u26a0 PostgreSQL init failed — conversation read endpoints will return 503`);
     }
   } else {
     console.log(`[exe-gateway] No database config — running without conversation storage.`);
@@ -118,6 +120,11 @@ async function main(): Promise<void> {
     authToken: config.authToken,
     whatsappVerifyToken: config.whatsappVerifyToken,
   });
+
+  // Mark DB as available for conversation read endpoints
+  if (dbReady) {
+    server.setDbAvailable(true);
+  }
 
   // Read-only mode gate — suppress all outbound at server + gateway level
   if (config.readOnly) {

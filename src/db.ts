@@ -20,10 +20,15 @@ export function initPool(config: DBConfig): pg.Pool {
   if (pool) return pool;
   pool = new pg.Pool({
     ...config,
-    max: 10,
+    max: 50,
     idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 10_000,
   });
   return pool;
+}
+
+export function hasPool(): boolean {
+  return pool !== null;
 }
 
 export function getPool(): pg.Pool {

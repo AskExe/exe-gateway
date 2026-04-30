@@ -18,7 +18,7 @@ import {
   type ServerResponse,
 } from "node:http";
 
-const DEFAULT_HOST = "127.0.0.1";
+const DEFAULT_HOST = "0.0.0.0";
 const BODY_SIZE_LIMIT = 1_048_576; // 1 MB
 
 export interface WebhookServerConfig {
@@ -48,10 +48,16 @@ export class WebhookServer {
   private limiters = new Map<string, OutboundLimiter>();
   private startedAt = 0;
   private _readOnly = false;
+  private _dbAvailable = false;
 
   /** Enable read-only mode — rejects all outbound sends via /api/send */
   setReadOnly(enabled: boolean): void {
     this._readOnly = enabled;
+  }
+
+  /** Mark conversation storage as available (called after successful DB init) */
+  setDbAvailable(available: boolean): void {
+    this._dbAvailable = available;
   }
 
   constructor(private config: WebhookServerConfig) {
@@ -427,6 +433,10 @@ export class WebhookServer {
   // ---- Conversation query API handlers ----
 
   private async handleApiThreads(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this._dbAvailable) {
+      sendJson(res, 503, { error: "Conversation storage unavailable — database not configured or init failed" });
+      return;
+    }
     try {
       const { getThreads } = await import("./conversation-store.js");
       const params = parseQuery(req.url ?? "");
@@ -442,6 +452,10 @@ export class WebhookServer {
   }
 
   private async handleApiThreadMessages(req: IncomingMessage, res: ServerResponse, threadId: number): Promise<void> {
+    if (!this._dbAvailable) {
+      sendJson(res, 503, { error: "Conversation storage unavailable — database not configured or init failed" });
+      return;
+    }
     try {
       const { getThreadMessages } = await import("./conversation-store.js");
       const params = parseQuery(req.url ?? "");
@@ -456,6 +470,10 @@ export class WebhookServer {
   }
 
   private async handleApiContacts(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this._dbAvailable) {
+      sendJson(res, 503, { error: "Conversation storage unavailable — database not configured or init failed" });
+      return;
+    }
     try {
       const { getContacts } = await import("./conversation-store.js");
       const params = parseQuery(req.url ?? "");
@@ -478,6 +496,10 @@ export class WebhookServer {
   }
 
   private async handleApiContactDetail(res: ServerResponse, contactId: number): Promise<void> {
+    if (!this._dbAvailable) {
+      sendJson(res, 503, { error: "Conversation storage unavailable — database not configured or init failed" });
+      return;
+    }
     try {
       const { getContactDetail } = await import("./conversation-store.js");
       const contact = await getContactDetail(contactId);
