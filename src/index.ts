@@ -10,6 +10,7 @@ export { Gateway, type GatewayOptions } from "./gateway.js";
 export { routeMessage, validateGatewayConfig, type RouteResult } from "./router.js";
 export { BotRegistry } from "./bot-registry.js";
 export { BotRuntime, buildExecAssistantTools, buildExecAssistantSystemPrompt } from "./bot-runtime.js";
+export type { BotRuntimeConfig } from "./bot-runtime.js";
 
 // Types
 export type {
@@ -35,6 +36,8 @@ export { createReceptionist } from "./bots/receptionist.js";
 export { AnthropicProvider } from "./providers/anthropic.js";
 export { OpenAICompatProvider } from "./providers/openai-compat.js";
 export { OllamaProvider } from "./providers/ollama.js";
+export { createProvider } from "./providers/factory.js";
+export type { FactoryProviderId, CreateProviderOptions } from "./providers/factory.js";
 export type {
   LLMProvider,
   NormalizedResponse,
@@ -74,6 +77,10 @@ export { ensureCRMContact } from "./contact-sync.js";
 
 // CRM webhook adapter
 export { createCRMWebhookHandler, parseTwentyWebhook } from "./adapters/crm-webhook.js";
+
+// Hooks & insight pipeline
+export { setHooks, getHooks } from "./hooks.js";
+export type { GatewayHooks, GatewayEvent, ConversationInsight } from "./hooks.js";
 
 // WhatsApp multi-account
 export {

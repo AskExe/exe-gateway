@@ -3,18 +3,30 @@
  *
  * Converts BotTemplate → BotRuntimeConfig, resolves the impedance mismatch
  * between template toolHandlers and runtime toolExecutor.
+ *
+ * Supports any LLM provider via the provider factory.
  */
 
 import { BotRuntime, type BotRuntimeConfig } from "./bot-runtime.js";
 import type { BotTemplate } from "./bot-templates/types.js";
+import type { LLMProvider } from "./providers/types.js";
+import { AnthropicProvider } from "./providers/anthropic.js";
 
 export class BotRegistry {
   private bots = new Map<string, BotRuntime>();
 
-  /** Register a bot from a template */
-  register(template: BotTemplate, apiKey: string): void {
+  /**
+   * Register a bot from a template.
+   * @param template - Bot template with tools, system prompt, and handlers
+   * @param providerOrApiKey - Either an LLMProvider instance or an API key (legacy, creates AnthropicProvider)
+   */
+  register(template: BotTemplate, providerOrApiKey: LLMProvider | string): void {
+    const provider = typeof providerOrApiKey === "string"
+      ? new AnthropicProvider("anthropic", { apiKey: providerOrApiKey })
+      : providerOrApiKey;
+
     const config: BotRuntimeConfig = {
-      apiKey,
+      provider,
       model: template.model,
       agentId: template.agentId,
       systemPrompt: template.systemPrompt,

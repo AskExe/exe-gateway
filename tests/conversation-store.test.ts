@@ -136,7 +136,15 @@ describe("conversation-store", () => {
 
   describe("storeMessage", () => {
     it("inserts message and updates thread stats", async () => {
+      // First result: dedup SELECT returns empty (no existing message)
+      // Second result: INSERT RETURNING id returns { id: 100 }
       queryResults = [{ id: 100 }];
+      // Override the mock to return empty for the dedup SELECT, then normal for INSERT
+      mockQuery.mockImplementationOnce(async (sql: string, args?: unknown[]) => {
+        queryLog.push({ sql, args: args ?? [] });
+        return { rows: [], rowCount: 0 }; // Dedup: no existing message
+      });
+
       const id = await storeMessage(
         {
           threadId: 1,
@@ -150,14 +158,21 @@ describe("conversation-store", () => {
       );
 
       expect(id).toBe(100);
-      // Should have 2 queries: INSERT + UPDATE thread stats
-      expect(queryLog).toHaveLength(2);
-      expect(queryLog[1].sql).toContain("UPDATE gateway_threads");
-      expect(queryLog[1].sql).toContain("message_count = message_count + 1");
+      // Should have 3 queries: dedup check SELECT + INSERT + UPDATE thread stats
+      expect(queryLog).toHaveLength(3);
+      expect(queryLog[0].sql).toContain("SELECT id FROM gateway_messages");
+      expect(queryLog[2].sql).toContain("UPDATE gateway_threads");
+      expect(queryLog[2].sql).toContain("message_count = message_count + 1");
     });
 
     it("stores raw_payload as JSON", async () => {
       queryResults = [{ id: 101 }];
+      // Return empty for dedup SELECT
+      mockQuery.mockImplementationOnce(async (sql: string, args?: unknown[]) => {
+        queryLog.push({ sql, args: args ?? [] });
+        return { rows: [], rowCount: 0 };
+      });
+
       await storeMessage(
         {
           threadId: 1,
@@ -170,7 +185,8 @@ describe("conversation-store", () => {
         mockPool as never,
       );
 
-      const args = queryLog[0].args;
+      // queryLog[0] is dedup SELECT, queryLog[1] is the INSERT
+      const args = queryLog[1].args;
       expect(args).toContain('{"key":"value"}');
     });
   });

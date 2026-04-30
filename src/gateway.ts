@@ -354,6 +354,24 @@ export class Gateway {
       getHooks().onIngest?.(msg, response, route.employee)?.catch((err: unknown) => {
         console.error("[gateway] Pipeline conversation ingest error:", err);
       });
+
+      // 14. Conversation turn hook — raw data for insight extraction (exe-wiki, exe-crm)
+      const customer = this.customerStore?.find(msg.platform, msg.senderId);
+      getHooks().onConversationTurn?.({
+        platform: msg.platform,
+        senderId: msg.senderId,
+        senderName: msg.senderName,
+        customerId: customer?.id,
+        inboundText: msg.text,
+        agentResponse: response,
+        agentId: route.employee,
+        messageId: msg.messageId,
+        timestamp: msg.timestamp,
+        accountId: msg.accountId,
+        chatType: msg.chatType,
+      })?.catch((err: unknown) => {
+        console.error("[gateway] Conversation turn hook error:", err);
+      });
     } catch (err) {
       const latencyMs = Date.now() - start;
       this.alertMonitor?.recordEvent(latencyMs, false);

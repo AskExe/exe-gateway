@@ -130,11 +130,64 @@ export async function initConversationStore(pool?: pg.Pool): Promise<void> {
       created_at TIMESTAMPTZ DEFAULT now()
     );
 
+    -- Customer identity resolution (persisted across restarts)
+    CREATE TABLE IF NOT EXISTS gateway_customers (
+      id UUID PRIMARY KEY,
+      name TEXT,
+      assigned_employee TEXT,
+      first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      interaction_count INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS gateway_customer_identities (
+      id SERIAL PRIMARY KEY,
+      customer_id UUID NOT NULL REFERENCES gateway_customers(id),
+      platform TEXT NOT NULL,
+      sender_id TEXT NOT NULL,
+      UNIQUE(platform, sender_id)
+    );
+
+    -- Session persistence (conversation state across restarts)
+    CREATE TABLE IF NOT EXISTS gateway_sessions (
+      id UUID PRIMARY KEY,
+      customer_id UUID REFERENCES gateway_customers(id),
+      bot_id TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      messages JSONB NOT NULL DEFAULT '[]',
+      started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_message_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      message_count INTEGER DEFAULT 0,
+      total_input_tokens INTEGER DEFAULT 0,
+      total_output_tokens INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'active'
+    );
+
+    -- Auto-reply state (persisted daily cap across restarts)
+    CREATE TABLE IF NOT EXISTS gateway_auto_reply_state (
+      id SERIAL PRIMARY KEY,
+      sender_id TEXT NOT NULL,
+      last_reply_at TIMESTAMPTZ NOT NULL,
+      reply_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      UNIQUE(sender_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS gateway_daily_caps (
+      id SERIAL PRIMARY KEY,
+      cap_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      auto_reply_count INTEGER DEFAULT 0,
+      UNIQUE(cap_date)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_messages_thread ON gateway_messages(thread_id, timestamp);
     CREATE INDEX IF NOT EXISTS idx_messages_account ON gateway_messages(account_id, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_messages_dedup ON gateway_messages(account_id, message_id);
     CREATE INDEX IF NOT EXISTS idx_contacts_phone ON gateway_contacts(phone);
     CREATE INDEX IF NOT EXISTS idx_contacts_crm ON gateway_contacts(crm_person_id);
     CREATE INDEX IF NOT EXISTS idx_threads_account ON gateway_threads(account_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_identities_lookup ON gateway_customer_identities(platform, sender_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_customer ON gateway_sessions(customer_id, bot_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_status ON gateway_sessions(status);
   `);
 }
 
@@ -253,6 +306,17 @@ export async function storeMessage(
   pool?: pg.Pool,
 ): Promise<number> {
   const p = pool ?? getPool();
+
+  // Deduplication: skip if this exact message was already stored for this account.
+  // Baileys can emit the same message multiple times on reconnect.
+  const existing = await p.query(
+    `SELECT id FROM gateway_messages WHERE account_id = $1 AND message_id = $2 LIMIT 1`,
+    [params.accountId, params.messageId],
+  );
+  if (existing.rows.length > 0) {
+    return existing.rows[0].id; // Already stored — return existing ID
+  }
+
   const result = await p.query(
     `INSERT INTO gateway_messages
        (thread_id, account_id, message_id, from_jid, from_me, text, push_name,

@@ -103,17 +103,21 @@ export async function storeInboundMessage(msg: NormalizedMessage): Promise<numbe
     pool,
   );
 
-  // Auto-import contact + try CRM linking (fire-and-forget)
+  // Auto-import contact + try CRM linking (fire-and-forget, but log errors)
   importContactFromMessage(msg)
     .then((cId) => {
       if (cId) {
         const phone = msg.senderPhone ?? parsePhoneFromJid(msg.senderId);
         if (phone) {
-          tryCRMLink(cId, phone).catch(() => {});
+          tryCRMLink(cId, phone).catch((err) => {
+            console.error("[pipeline-store] CRM link failed:", err instanceof Error ? err.message : err);
+          });
         }
       }
     })
-    .catch(() => {});
+    .catch((err) => {
+      console.error("[pipeline-store] Contact import failed:", err instanceof Error ? err.message : err);
+    });
 
   return messageId;
 }

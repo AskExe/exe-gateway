@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { WebhookServer } from "../src/webhook-server.js";
 
 const TEST_PORT = 19876; // unlikely to collide
+const TEST_HOST = "127.0.0.1"; // Bind to localhost in tests (prod defaults to 0.0.0.0)
 
 /** Simple helper to make HTTP requests to the test server */
 async function req(
@@ -44,7 +45,7 @@ describe("WebhookServer", () => {
 
   describe("GET /health", () => {
     it("returns status, uptime, and registered handlers", async () => {
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       server.onPlatform("whatsapp", async () => {});
       server.onPlatform("email", async () => {});
       await server.start();
@@ -67,7 +68,7 @@ describe("WebhookServer", () => {
   describe("POST /webhook/:platform", () => {
     it("routes payload to the correct platform handler", async () => {
       const received: unknown[] = [];
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       server.onPlatform("whatsapp", async (body) => {
         received.push(body);
       });
@@ -88,7 +89,7 @@ describe("WebhookServer", () => {
     });
 
     it("returns 200 for unknown platform (prevents retries)", async () => {
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       await server.start();
 
       const { status, data } = await req("POST", "/webhook/unknown", {
@@ -100,7 +101,7 @@ describe("WebhookServer", () => {
     });
 
     it("returns 200 with no platform in path", async () => {
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       await server.start();
 
       const { status } = await req("POST", "/webhook/", {
@@ -114,7 +115,7 @@ describe("WebhookServer", () => {
       const waReceived: unknown[] = [];
       const emailReceived: unknown[] = [];
 
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       server.onPlatform("whatsapp", async (body) => waReceived.push(body));
       server.onPlatform("email", async (body) => emailReceived.push(body));
       await server.start();
@@ -139,6 +140,7 @@ describe("WebhookServer", () => {
     it("rejects POST without auth when token is configured", async () => {
       server = new WebhookServer({
         port: TEST_PORT,
+        host: TEST_HOST,
         authToken: "secret-123",
       });
       server.onPlatform("whatsapp", async () => {});
@@ -155,6 +157,7 @@ describe("WebhookServer", () => {
     it("rejects POST with wrong token", async () => {
       server = new WebhookServer({
         port: TEST_PORT,
+        host: TEST_HOST,
         authToken: "secret-123",
       });
       server.onPlatform("whatsapp", async () => {});
@@ -172,6 +175,7 @@ describe("WebhookServer", () => {
       const received: unknown[] = [];
       server = new WebhookServer({
         port: TEST_PORT,
+        host: TEST_HOST,
         authToken: "secret-123",
       });
       server.onPlatform("whatsapp", async (body) => received.push(body));
@@ -191,7 +195,7 @@ describe("WebhookServer", () => {
 
     it("does not require auth when no token configured", async () => {
       const received: unknown[] = [];
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       server.onPlatform("whatsapp", async (body) => received.push(body));
       await server.start();
 
@@ -211,7 +215,7 @@ describe("WebhookServer", () => {
 
   describe("malformed payloads", () => {
     it("returns 200 on invalid JSON (prevents retries)", async () => {
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       server.onPlatform("whatsapp", async () => {});
       await server.start();
 
@@ -230,7 +234,7 @@ describe("WebhookServer", () => {
     });
 
     it("returns 200 on empty body", async () => {
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       server.onPlatform("whatsapp", async () => {});
       await server.start();
 
@@ -254,6 +258,7 @@ describe("WebhookServer", () => {
     it("responds with challenge when token matches", async () => {
       server = new WebhookServer({
         port: TEST_PORT,
+        host: TEST_HOST,
         whatsappVerifyToken: "my_verify_token",
       });
       await server.start();
@@ -276,6 +281,7 @@ describe("WebhookServer", () => {
     it("returns 403 when token does not match", async () => {
       server = new WebhookServer({
         port: TEST_PORT,
+        host: TEST_HOST,
         whatsappVerifyToken: "my_verify_token",
       });
       await server.start();
@@ -294,7 +300,7 @@ describe("WebhookServer", () => {
     });
 
     it("returns 403 when no verify token configured", async () => {
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       await server.start();
 
       const params = new URLSearchParams({
@@ -317,7 +323,7 @@ describe("WebhookServer", () => {
 
   describe("unknown routes", () => {
     it("returns 404 for unknown paths", async () => {
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       await server.start();
 
       const { status, data } = await req("GET", "/unknown");
@@ -334,7 +340,7 @@ describe("WebhookServer", () => {
     it("does not crash when handler throws", async () => {
       const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       server.onPlatform("test", async () => {
         throw new Error("Handler boom");
       });
@@ -369,7 +375,7 @@ describe("WebhookServer", () => {
 
   describe("lifecycle", () => {
     it("start and stop cleanly", async () => {
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       await server.start();
       expect(server.listening).toBe(true);
 
@@ -378,7 +384,7 @@ describe("WebhookServer", () => {
     });
 
     it("stop is idempotent", async () => {
-      server = new WebhookServer({ port: TEST_PORT });
+      server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
       await server.start();
       await server.stop();
       await server.stop(); // should not throw

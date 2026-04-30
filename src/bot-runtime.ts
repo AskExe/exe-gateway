@@ -1,12 +1,16 @@
 /**
- * Exec-assistant runtime — API-direct bot using the Anthropic API.
+ * Exec-assistant runtime — model-agnostic bot using the LLMProvider interface.
  *
  * This is NOT Claude Code. It's a lightweight conversational runtime
- * that calls the Anthropic API with a system prompt + MCP-like tools.
+ * that calls ANY LLM provider (Anthropic, OpenAI, Ollama, OpenCode) via
+ * the unified LLMProvider interface with a system prompt + MCP-like tools.
  * Permission guard runs AFTER model response, BEFORE tool execution.
+ *
+ * Provider abstraction: bot-runtime does NOT import Anthropic SDK directly.
+ * It uses NormalizedMessageParams/NormalizedResponse from providers/types.ts.
+ * This means each bot can use a different model — Claude, GPT-4, Llama, etc.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
 import type { AdapterPermissions, NormalizedMessage } from "./types.js";
 import {
   guardToolUseBlocks,
@@ -14,8 +18,15 @@ import {
   type ToolUseBlock,
 } from "./permission-guard.js";
 import { READ_TOOLS, WRITE_TOOLS, EXECUTE_TOOLS } from "./types.js";
+import type {
+  LLMProvider,
+  NormalizedContentBlock,
+  NormalizedLLMMessage,
+  NormalizedTool,
+} from "./providers/types.js";
+import { CircuitBreaker } from "./reliability.js";
 
-/** Tool definition for the Anthropic API */
+/** Tool definition for the bot runtime */
 interface ToolDefinition {
   name: string;
   description: string;
@@ -25,10 +36,7 @@ interface ToolDefinition {
 /** Conversation message for history tracking */
 interface ConversationMessage {
   role: "user" | "assistant";
-  content:
-    | string
-    | Anthropic.ContentBlockParam[]
-    | Anthropic.ToolResultBlockParam[];
+  content: string | NormalizedContentBlock[];
 }
 
 /** Tool executor function */
@@ -39,13 +47,18 @@ type ToolExecutor = (
 
 /** Bot runtime configuration */
 export interface BotRuntimeConfig {
-  apiKey: string;
+  /** LLM provider instance (Anthropic, OpenAI, Ollama, etc.) */
+  provider: LLMProvider;
+  /** Model to use (e.g., "claude-sonnet-4-20250514", "gpt-4o", "llama3.1") */
   model?: string;
   agentId: string;
   systemPrompt: string;
   tools: ToolDefinition[];
   toolExecutor: ToolExecutor;
   maxTurns?: number;
+
+  /** @deprecated Use `provider` instead. Kept for backwards compatibility. */
+  apiKey?: string;
 }
 
 const DEFAULT_MODEL = "claude-sonnet-4-20250514";
@@ -109,15 +122,28 @@ export function filterToolsForPermissions(
 /**
  * Exec-assistant bot runtime.
  * Manages conversation history and tool execution with permission enforcement.
+ * Model-agnostic — works with any LLMProvider implementation.
  */
 export class BotRuntime {
-  private client: Anthropic;
+  private provider: LLMProvider;
   private config: BotRuntimeConfig;
   private conversations = new Map<string, ConversationMessage[]>();
+  private circuitBreaker: CircuitBreaker;
 
   constructor(config: BotRuntimeConfig) {
     this.config = config;
-    this.client = new Anthropic({ apiKey: config.apiKey });
+    this.provider = config.provider;
+    this.circuitBreaker = new CircuitBreaker(`llm-${config.agentId}`, {
+      windowMs: 60_000,
+      failureThreshold: 0.5,
+      minimumRequests: 3,
+      halfOpenAfterMs: 30_000,
+    });
+  }
+
+  /** The provider powering this bot */
+  get providerName(): string {
+    return this.provider.name;
   }
 
   /**
@@ -128,6 +154,13 @@ export class BotRuntime {
     msg: NormalizedMessage,
     permissions: AdapterPermissions,
   ): Promise<string> {
+    // Circuit breaker check — fail fast if provider is down
+    if (!this.circuitBreaker.canRequest()) {
+      const state = this.circuitBreaker.getState();
+      console.warn(`[bot-runtime] Circuit breaker ${state} for ${this.provider.name} — failing fast`);
+      return "I'm having trouble connecting to my language model right now. Please try again in a minute.";
+    }
+
     const sessionKey = msg.chatType === "group" ? msg.channelId : msg.senderId;
     const history = this.getHistory(sessionKey);
 
@@ -146,6 +179,13 @@ export class BotRuntime {
       permissions,
     );
 
+    // Convert tool definitions to normalized format
+    const normalizedTools: NormalizedTool[] = allowedTools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.input_schema,
+    }));
+
     const model = this.config.model ?? DEFAULT_MODEL;
     const maxTurns = this.config.maxTurns ?? MAX_TURNS;
     let turns = 0;
@@ -153,30 +193,33 @@ export class BotRuntime {
     while (turns < maxTurns) {
       turns++;
 
-      const response = await this.client.messages.create({
-        model,
-        max_tokens: 4096,
-        system: systemPrompt,
-        messages: history.map((m) => ({
-          role: m.role,
-          content: m.content,
-        })) as Anthropic.MessageParam[],
-        tools: allowedTools.map((t) => ({
-          name: t.name,
-          description: t.description,
-          input_schema: t.input_schema as Anthropic.Tool.InputSchema,
-        })),
-      });
+      let response;
+      try {
+        response = await this.provider.createMessage({
+          model,
+          maxTokens: 4096,
+          system: systemPrompt,
+          messages: history.map((m) => ({
+            role: m.role,
+            content: m.content,
+          })) as NormalizedLLMMessage[],
+          tools: normalizedTools,
+        });
+        this.circuitBreaker.recordSuccess();
+      } catch (err) {
+        this.circuitBreaker.recordFailure();
+        throw err;
+      }
 
       // Extract tool_use blocks
       const toolUseBlocks = response.content.filter(
-        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+        (b): b is Extract<NormalizedContentBlock, { type: "tool_use" }> => b.type === "tool_use",
       );
 
       // If no tool calls, extract text and return
       if (toolUseBlocks.length === 0) {
         const textContent = response.content
-          .filter((b): b is Anthropic.TextBlock => b.type === "text")
+          .filter((b): b is Extract<NormalizedContentBlock, { type: "text" }> => b.type === "text")
           .map((b) => b.text)
           .join("\n");
 
@@ -194,11 +237,11 @@ export class BotRuntime {
       // Add assistant response to history
       history.push({
         role: "assistant",
-        content: response.content as Anthropic.ContentBlockParam[],
+        content: response.content,
       });
 
       // Build tool results
-      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      const toolResults: NormalizedContentBlock[] = [];
 
       // Execute allowed tools
       for (const block of allowed) {
@@ -260,6 +303,14 @@ export class BotRuntime {
   /** Clear conversation history for a session */
   clearHistory(sessionKey: string): void {
     this.conversations.delete(sessionKey);
+  }
+
+  /** Get circuit breaker state for health monitoring */
+  getCircuitState(): { state: string; failureRate: number } {
+    return {
+      state: this.circuitBreaker.getState(),
+      failureRate: this.circuitBreaker.getFailureRate(),
+    };
   }
 }
 
@@ -466,6 +517,20 @@ export function buildExecAssistantTools(): ToolDefinition[] {
           result: { type: "string", description: "Completion summary" },
         },
         required: ["task_id"],
+      },
+    },
+    {
+      name: "query_conversations",
+      description: "Search stored conversations across all platforms. Find messages by content, sender, or time range.",
+      input_schema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search text to find in messages" },
+          platform: { type: "string", description: "Filter by platform (whatsapp, telegram, etc.)" },
+          sender_id: { type: "string", description: "Filter by sender" },
+          limit: { type: "number", description: "Max results (default 20)" },
+        },
+        required: ["query"],
       },
     },
   ];

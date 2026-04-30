@@ -29,6 +29,7 @@ import {
 
 class MockAdapter implements PlatformAdapter {
   readonly platform: GatewayPlatform;
+  readonly accountName = "default";
   private handler: ((msg: NormalizedMessage) => Promise<void>) | null = null;
   sentMessages: Array<{ channelId: string; text: string }> = [];
   typingChannels: string[] = [];
@@ -112,16 +113,16 @@ describe("Gateway integration", () => {
     });
     gw.registerAdapter(adapter);
 
-    // First message passes rate limit (but no bot registered → "not available")
+    // First message passes rate limit (but no bot registered + auto-reply off → silent drop)
     await adapter.simulateMessage(makeMsg());
-    // Second message blocked by rate limiter
+    // Second message blocked by rate limiter → sends "slow down"
     await adapter.simulateMessage(makeMsg());
-    expect(adapter.sentMessages).toHaveLength(2);
-    // Rate-limited message says "too quickly" or "slow down"
-    expect(adapter.sentMessages[1]!.text).toContain("too quickly");
+    expect(adapter.sentMessages).toHaveLength(1);
+    // Rate-limited message says "too quickly"
+    expect(adapter.sentMessages[0]!.text).toContain("too quickly");
   });
 
-  it("responds with 'not available' when bot is not registered", async () => {
+  it("silently drops message when bot is not registered and auto-reply is off", async () => {
     const adapter = new MockAdapter("whatsapp");
     const registry = new BotRegistry();
 
@@ -133,8 +134,8 @@ describe("Gateway integration", () => {
     gw.registerAdapter(adapter);
 
     await adapter.simulateMessage(makeMsg());
-    expect(adapter.sentMessages).toHaveLength(1);
-    expect(adapter.sentMessages[0]!.text).toContain("not available");
+    // No bot registered + auto-reply disabled by default = silent drop (no spam)
+    expect(adapter.sentMessages).toHaveLength(0);
   });
 
   it("sends typing indicator when bot is found", async () => {
@@ -254,14 +255,14 @@ describe("Gateway integration", () => {
     expect(health.bots).toContain("signup-bot");
     expect(health.sessions).toBeDefined();
     expect(health.alerts).toBe(0);
-    expect(health.adapters.get("whatsapp")).toEqual({ connected: true });
+    expect(health.adapters.get("whatsapp:default")).toEqual({ connected: true });
   });
 
   it("routes webchat to signup-bot (not default)", async () => {
     const adapter = new MockAdapter("webchat");
     const registry = new BotRegistry();
-    // signup-bot is registered but will fail because no real API key
-    // We just verify the routing is correct via the "not available" message NOT appearing
+    // signup-bot is NOT registered → auto-reply safety gates block silent drop
+    // No message is sent because auto-reply is disabled by default (correct behavior)
 
     const gw = new Gateway({
       config: gatewayConfig,
@@ -271,9 +272,8 @@ describe("Gateway integration", () => {
     gw.registerAdapter(adapter);
 
     await adapter.simulateMessage(makeMsg({ platform: "webchat" }));
-    // signup-bot not registered → "not available"
-    // But this proves routing happened (if signup-bot was registered, it would get the message)
-    expect(adapter.sentMessages[0]!.text).toContain("not available");
+    // No bot registered + auto-reply disabled = message silently dropped (no spam)
+    expect(adapter.sentMessages).toHaveLength(0);
   });
 });
 
