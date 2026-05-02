@@ -7,8 +7,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { createConnection } from "node:net";
 import { SocksProxyAgent } from "socks-proxy-agent";
@@ -19,12 +17,13 @@ import type {
   SendOptions,
   DataCategory,
 } from "../types.js";
+import { getDefaultWhatsAppAuthDir } from "../config.js";
 
 const INITIAL_RECONNECT_DELAY_MS = 5_000;  // Start at 5s
 const MAX_RECONNECT_DELAY_MS = 300_000;    // Cap at 5 minutes
 const PROXY_DOWN_INTERVAL_MS = 600_000;    // 10 minutes when proxy unreachable
 const PROXY_HEALTH_TIMEOUT_MS = 5_000;     // 5s TCP connect timeout
-const AUTH_DIR = join(homedir(), ".exe-os", "whatsapp-auth");
+const AUTH_DIR = getDefaultWhatsAppAuthDir("default");
 
 // SOCKS proxy for routing WhatsApp traffic through residential IP.
 // Per-account proxy (credentials.proxy) overrides this global fallback.

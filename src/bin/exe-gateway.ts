@@ -3,86 +3,29 @@
  * exe-gateway — CLI entry point for the webhook server + gateway.
  *
  * Entry: `exe-os gateway` or `node dist/bin/exe-gateway.js`
- * Reads config from ~/.exe-os/gateway.json
+ * Reads config from EXE_GATEWAY_CONFIG or ~/.exe-os/gateway.json
  * Instantiates WebhookServer + Gateway + adapters
  * Handles SIGTERM/SIGINT gracefully
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
-import os from "node:os";
+import crypto from "node:crypto";
 import { WebhookServer } from "../webhook-server.js";
 import { Gateway } from "../gateway.js";
 import { BotRegistry } from "../bot-registry.js";
-import { getHooks } from "../hooks.js";
+import { getHooks, setHooks } from "../hooks.js";
 import { initPool, closePool } from "../db.js";
-import { initConversationStore, storeMessage, upsertAccount, upsertContact } from "../conversation-store.js";
+import { initConversationStore } from "../conversation-store.js";
 import { initAnalyticsStore } from "../analytics.js";
-import { storeInboundMessage, setStorageFilter } from "../pipeline-store.js";
-import type { PlatformConfig, NormalizedMessage } from "../types.js";
-
-const CONFIG_DIR = path.join(os.homedir(), ".exe-os");
-const CONFIG_PATH = path.join(CONFIG_DIR, "gateway.json");
-const DEFAULT_PORT = 3100;
-
-interface GatewayJsonConfig {
-  port?: number;
-  host?: string;
-  authToken?: string;
-  whatsappVerifyToken?: string;
-  /**
-   * Read-only ingestion mode. Receives and stores all messages but sends nothing.
-   * No auto-reply, no typing indicators, no bot responses, no /api/send.
-   * Use for background conversation monitoring — zero bot footprint.
-   */
-  readOnly?: boolean;
-  database?: { host: string; port: number; user: string; password: string; database: string };
-  storageFilter?: { enabled: boolean; allowGroups?: string[]; allowContacts?: string[] };
-  /** LLM proxy configuration — enables POST /v1/messages */
-  llmProxy?: {
-    enabled: boolean;
-    /** Master Anthropic API key. Falls back to ANTHROPIC_API_KEY env var. */
-    anthropicApiKey?: string;
-    /** Margin percentage on top of cost (default 20) */
-    marginPercent?: number;
-  };
-  autoReply?: {
-    enabled: boolean;
-    message?: string;
-    allowGroups?: string[];
-    allowContacts?: string[];
-    cooldownHours?: number;
-    dailyCap?: number;
-    dmOnly?: boolean;
-  };
-  adapters?: Record<string, {
-    enabled?: boolean;
-    credentials?: Record<string, string>;
-    /** Default SOCKS proxy for all accounts. Per-account `proxy` overrides this. */
-    proxy?: string;
-    accounts?: Array<{ name: string; authDir?: string; defaultAgent?: string; readOnly?: boolean; proxy?: string }>;
-  }>;
-}
-
-function loadConfig(): GatewayJsonConfig {
-  if (!existsSync(CONFIG_PATH)) {
-    console.log(
-      `[exe-gateway] No config at ${CONFIG_PATH} — using defaults (port ${DEFAULT_PORT})`,
-    );
-    return {};
-  }
-
-  try {
-    const raw = readFileSync(CONFIG_PATH, "utf-8");
-    return JSON.parse(raw) as GatewayJsonConfig;
-  } catch (err) {
-    console.error(
-      `[exe-gateway] Failed to parse ${CONFIG_PATH}:`,
-      err instanceof Error ? err.message : err,
-    );
-    return {};
-  }
-}
+import { setStorageFilter } from "../pipeline-store.js";
+import type { PlatformConfig } from "../types.js";
+import {
+  DEFAULT_BIND_HOST,
+  DEFAULT_PORT,
+  getDefaultWhatsAppAuthDir,
+  loadGatewayConfig,
+  validateStartupConfig,
+} from "../config.js";
+import { WsRelay } from "../ws-relay.js";
 
 async function main(): Promise<void> {
   // License gate — if a hook is injected, validate. Otherwise MIT mode (boot freely).
@@ -99,8 +42,22 @@ async function main(): Promise<void> {
     }
   }
 
-  const config = loadConfig();
+  const { config, configPath, stateDir } = loadGatewayConfig();
+  const validation = validateStartupConfig(config);
+  if (validation.errors.length > 0) {
+    for (const error of validation.errors) {
+      console.error(`[exe-gateway] Config error: ${error}`);
+    }
+    process.exit(1);
+  }
+  for (const warning of validation.warnings) {
+    console.warn(`[exe-gateway] Config warning: ${warning}`);
+  }
+
   const port = config.port ?? DEFAULT_PORT;
+  const host = config.host ?? DEFAULT_BIND_HOST;
+  console.log(`[exe-gateway] Config: ${configPath}`);
+  console.log(`[exe-gateway] State dir: ${stateDir}`);
 
   // Initialize PostgreSQL if database config is present
   let dbReady = false;
@@ -142,10 +99,24 @@ async function main(): Promise<void> {
 
   const server = new WebhookServer({
     port,
-    host: config.host,
+    host,
     authToken: config.authToken,
     whatsappVerifyToken: config.whatsappVerifyToken,
   });
+
+  const wsRelay = buildWsRelay(config);
+  if (wsRelay) {
+    const existingHooks = getHooks();
+    setHooks({
+      ...existingHooks,
+      onEvent: (event) => {
+        existingHooks.onEvent?.(event);
+        wsRelay.broadcast(
+          event as unknown as Record<string, unknown> & { type: string },
+        );
+      },
+    });
+  }
 
   // Mark DB as available for conversation read endpoints
   if (dbReady) {
@@ -207,7 +178,7 @@ async function main(): Promise<void> {
 
     for (const account of accounts) {
       const authDir = account.authDir ??
-        path.join(os.homedir(), ".exe-os", ".auth", `whatsapp-${account.name}`);
+        getDefaultWhatsAppAuthDir(account.name);
 
       // Per-account read-only: global readOnly overrides, otherwise check account-level flag
       const isReadOnly = config.readOnly || account.readOnly === true;
@@ -240,7 +211,10 @@ async function main(): Promise<void> {
       platformConfigs.set(`telegram:${account.name}`, {
         platform: "telegram",
         permissions: { canRead: true, canWrite: true, canExecute: false },
-        credentials: { ...accountCreds, ...(adapters.telegram.credentials ?? {}) },
+        credentials: {
+          ...toCredentialRecord(accountCreds),
+          ...(adapters.telegram.credentials ?? {}),
+        },
       });
       console.log(`[exe-gateway] Telegram account "${account.name}" registered`);
     }
@@ -257,7 +231,10 @@ async function main(): Promise<void> {
       platformConfigs.set(`discord:${account.name}`, {
         platform: "discord",
         permissions: { canRead: true, canWrite: true, canExecute: false },
-        credentials: { ...accountCreds, ...(adapters.discord.credentials ?? {}) },
+        credentials: {
+          ...toCredentialRecord(accountCreds),
+          ...(adapters.discord.credentials ?? {}),
+        },
       });
       console.log(`[exe-gateway] Discord account "${account.name}" registered`);
     }
@@ -274,7 +251,10 @@ async function main(): Promise<void> {
       platformConfigs.set(`slack:${account.name}`, {
         platform: "slack",
         permissions: { canRead: true, canWrite: true, canExecute: false },
-        credentials: { ...accountCreds, ...(adapters.slack.credentials ?? {}) },
+        credentials: {
+          ...toCredentialRecord(accountCreds),
+          ...(adapters.slack.credentials ?? {}),
+        },
       });
       console.log(`[exe-gateway] Slack account "${account.name}" registered`);
     }
@@ -304,7 +284,10 @@ async function main(): Promise<void> {
       platformConfigs.set(`email:${account.name}`, {
         platform: "email",
         permissions: { canRead: true, canWrite: true, canExecute: false },
-        credentials: { ...accountCreds, ...(adapters.email.credentials ?? {}) },
+        credentials: {
+          ...toCredentialRecord(accountCreds),
+          ...(adapters.email.credentials ?? {}),
+        },
       });
       console.log(`[exe-gateway] Email account "${account.name}" registered`);
     }
@@ -338,7 +321,11 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     console.log("\n[exe-gateway] Shutting down...");
     await gateway.stop();
+    if (wsRelay) {
+      await wsRelay.stop();
+    }
     await server.stop();
+    await closePool();
     process.exit(0);
   };
 
@@ -346,7 +333,10 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void shutdown());
 
   await server.start();
-  console.log(`[exe-gateway] Ready on port ${port}`);
+  if (wsRelay) {
+    await wsRelay.start();
+  }
+  console.log(`[exe-gateway] Ready on ${host}:${port}`);
 }
 
 main().catch((err) => {
@@ -355,3 +345,43 @@ main().catch((err) => {
   if (process.env.DEBUG) console.error(err);
   process.exit(1);
 });
+
+function buildWsRelay(
+  config: {
+    authToken?: string;
+    wsRelay?: {
+      enabled?: boolean;
+      host?: string;
+      port?: number;
+      authToken?: string;
+    };
+  },
+): WsRelay | null {
+  if (!config.wsRelay?.enabled) return null;
+
+  const authToken = config.wsRelay.authToken;
+  if (!authToken) {
+    throw new Error("wsRelay.enabled=true requires wsRelay.authToken.");
+  }
+
+  const tokenBuffer = Buffer.from(authToken, "hex");
+  const authTokenHash = crypto.createHash("sha256").update(tokenBuffer).digest("hex");
+
+  return new WsRelay({
+    port: config.wsRelay.port ?? 3101,
+    host: config.wsRelay.host ?? DEFAULT_BIND_HOST,
+    authTokenHash,
+  });
+}
+
+function toCredentialRecord(
+  record: Record<string, string | boolean | undefined>,
+): Record<string, string> {
+  const credentials: Record<string, string> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value === "string") {
+      credentials[key] = value;
+    }
+  }
+  return credentials;
+}

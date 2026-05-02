@@ -1,0 +1,23 @@
+services:
+  exe-gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: exe-gateway:local
+    container_name: exe-gateway
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      EXE_GATEWAY_HOME: /data
+      EXE_GATEWAY_CONFIG: /data/gateway.json
+    ports:
+      - "127.0.0.1:3100:3100"
+      - "127.0.0.1:3101:3101"
+    volumes:
+      - gateway_data:/data
+      - ./gateway.example.json:/data/gateway.json:ro
+
+volumes:
+  gateway_data:

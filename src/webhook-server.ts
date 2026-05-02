@@ -20,7 +20,7 @@ import {
   type ServerResponse,
 } from "node:http";
 
-const DEFAULT_HOST = "0.0.0.0";
+const DEFAULT_HOST = "127.0.0.1";
 const BODY_SIZE_LIMIT = 1_048_576; // 1 MB
 
 export interface WebhookServerConfig {
@@ -74,10 +74,11 @@ export class WebhookServer {
   }
 
   constructor(private config: WebhookServerConfig) {
-    if (process.env.NODE_ENV === "production" && !config.authToken) {
+    const host = config.host ?? DEFAULT_HOST;
+    if ((process.env.NODE_ENV === "production" || isPublicBindHost(host)) && !config.authToken) {
       throw new Error(
         "[webhook-server] authToken is required in production. " +
-          "Set it in ~/.exe-os/gateway.json or pass it in WebhookServerConfig.",
+          "Set EXE_GATEWAY_AUTH_TOKEN, authToken in the config file, or pass it in WebhookServerConfig.",
       );
     }
   }
@@ -627,6 +628,11 @@ function clampLimit(raw?: string): number {
   const n = parseInt(raw ?? "50", 10);
   if (isNaN(n) || n < 1) return 50;
   return Math.min(n, 200);
+}
+
+function isPublicBindHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  return !["127.0.0.1", "localhost", "::1"].includes(normalized);
 }
 
 /** Extract platform name from URL path /webhook/:platform */

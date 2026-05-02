@@ -10,8 +10,9 @@
  */
 
 import { existsSync, readFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { SocksProxyAgent } from "socks-proxy-agent";
 
 const MAX_ATTEMPTS = 3;
 const COOLDOWN_MS = 30_000;
@@ -32,10 +33,16 @@ if (phoneNumber.length < 10) {
   process.exit(1);
 }
 
-// Resolve auth dir — check gateway.json first, fall back to default
-let authDir = join(homedir(), ".exe-os", ".auth", `whatsapp-${accountName}`);
+const stateDir = process.env.EXE_GATEWAY_HOME?.trim()
+  ? resolve(process.env.EXE_GATEWAY_HOME.trim())
+  : join(homedir(), ".exe-os");
+const configPath = process.env.EXE_GATEWAY_CONFIG?.trim()
+  ? resolve(process.env.EXE_GATEWAY_CONFIG.trim())
+  : join(stateDir, "gateway.json");
 
-const configPath = join(homedir(), ".exe-os", "gateway.json");
+// Resolve auth dir + proxy — check gateway.json first, fall back to defaults/env
+let authDir = join(stateDir, ".auth", `whatsapp-${accountName}`);
+let proxyUrl = process.env.WHATSAPP_PROXY_URL || "";
 if (existsSync(configPath)) {
   try {
     const config = JSON.parse(readFileSync(configPath, "utf8"));
@@ -44,6 +51,7 @@ if (existsSync(configPath)) {
     if (match?.authDir) {
       authDir = match.authDir;
     }
+    proxyUrl = match?.proxy || config?.adapters?.whatsapp?.proxy || proxyUrl;
   } catch {
     // Ignore config parse errors — use default
   }
@@ -54,6 +62,9 @@ mkdirSync(authDir, { recursive: true });
 console.log(`[pair] Account: ${accountName}`);
 console.log(`[pair] Phone: +${phoneNumber}`);
 console.log(`[pair] Auth dir: ${authDir}`);
+if (proxyUrl) {
+  console.log(`[pair] Proxy: ${proxyUrl}`);
+}
 console.log("");
 
 const baileys = await import("@whiskeysockets/baileys");
@@ -82,6 +93,7 @@ async function pair() {
 
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version } = await fetchLatestBaileysVersion();
+  const proxyAgent = proxyUrl ? new SocksProxyAgent(proxyUrl) : undefined;
 
   const sock = makeWASocket({
     auth: {
@@ -92,6 +104,12 @@ async function pair() {
     printQRInTerminal: false,
     browser: ["Chrome", "Chrome", "130.0.0"],  // Blend in — real Chrome linked-device fingerprint
     markOnlineOnConnect: false,
+    ...(proxyUrl
+      ? {
+          agent: proxyAgent,
+          fetchAgent: proxyAgent,
+        }
+      : {}),
   });
 
   sock.ev.on("creds.update", saveCreds);

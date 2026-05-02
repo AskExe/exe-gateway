@@ -2,7 +2,7 @@
  * LLM Proxy — transparent Anthropic API proxy with auth, metering, and margin.
  *
  * Speaks the Anthropic Messages protocol. Clients (exe-wiki) configure:
- *   ANTHROPIC_BASE_URL=https://api.askexe.com
+ *   ANTHROPIC_BASE_URL=https://gateway.example.com
  *   ANTHROPIC_API_KEY=exe_sk_<customer_key>
  *
  * The proxy:

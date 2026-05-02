@@ -35,15 +35,15 @@ exe-gateway is a self-hosted messaging gateway that connects WhatsApp, Telegram,
 curl -fsSL https://raw.githubusercontent.com/AskExe/exe-gateway/main/install.sh | bash
 ```
 
-This installs Node.js 20, clones the repo to `/opt/exe-gateway`, builds from source, creates a system user, generates an auth token, and sets up the systemd service.
+This installs Node.js 20, clones the repo to `/opt/exe-gateway`, builds from source, creates a system user, writes `/home/exe/.exe-os/gateway.json`, writes `/etc/exe-gateway/exe-gateway.env`, and installs the systemd service.
 
 ### Pair WhatsApp
 
 ```bash
-node /opt/exe-gateway/pair-whatsapp.mjs my-account +1234567890
+sudo -u exe node /opt/exe-gateway/pair-whatsapp.mjs my-account +1234567890
 ```
 
-Scan the QR code with WhatsApp on your phone. The session persists across restarts.
+The pairing script reads the same config and proxy settings as the gateway, then stores the session under `/home/exe/.exe-os/.auth/`.
 
 ### Start the service
 
@@ -54,19 +54,22 @@ systemctl start exe-gateway
 ### Verify
 
 ```bash
-curl -H "Authorization: Bearer <your-token>" http://localhost:3100/health
+curl -H "Authorization: Bearer <your-token>" http://127.0.0.1:3100/health
 ```
 
-The auth token is printed during installation and stored in `/opt/exe-gateway/.env`.
+The auth token is printed during installation and stored in `/etc/exe-gateway/exe-gateway.env`.
 
 ### Manual install (any platform)
 
 ```bash
 git clone https://github.com/AskExe/exe-gateway.git
 cd exe-gateway
-npm install
+npm ci
 npm run build
-cp deploy/.env.example ~/.exe-os/gateway.json  # Edit with your config
+mkdir -p ~/.exe-os
+cp deploy/gateway.example.json ~/.exe-os/gateway.json
+cp deploy/.env.example .env
+set -a && source .env && set +a
 node dist/bin/exe-gateway.js
 ```
 
@@ -113,7 +116,7 @@ microsocks -i $(tailscale ip -4) -p 1080 &
 **2. Configure exe-gateway to use the proxy:**
 
 ```bash
-# In .env
+# In /etc/exe-gateway/exe-gateway.env
 WHATSAPP_PROXY_URL=socks5://<home-tailscale-ip>:1080
 ```
 
@@ -145,12 +148,11 @@ See [`docs/tailscale-exit-node.md`](docs/tailscale-exit-node.md) for troubleshoo
 
 ## Multi-Account Configuration
 
-Config lives at `~/.exe-os/gateway.json`. Each platform supports multiple accounts with independent sessions and rate limiters.
+Runtime config lives at `~/.exe-os/gateway.json` by default, or the path set in `EXE_GATEWAY_CONFIG`. Secrets and environment overrides live in `/etc/exe-gateway/exe-gateway.env` in the installer flow.
 
 ```json
 {
   "port": 3100,
-  "authToken": "your-secret-token",
   "adapters": {
     "whatsapp": {
       "enabled": true,
@@ -170,7 +172,7 @@ Config lives at `~/.exe-os/gateway.json`. Each platform supports multiple accoun
       "accounts": [
         {
           "name": "main-bot",
-          "botToken": "123456:ABC-DEF..."
+          "bot_token": "123456:ABC-DEF..."
         }
       ]
     },
@@ -179,8 +181,7 @@ Config lives at `~/.exe-os/gateway.json`. Each platform supports multiple accoun
       "accounts": [
         {
           "name": "community-bot",
-          "botToken": "your-discord-token",
-          "applicationId": "your-app-id"
+          "bot_token": "your-discord-token"
         }
       ]
     },
@@ -189,8 +190,8 @@ Config lives at `~/.exe-os/gateway.json`. Each platform supports multiple accoun
       "accounts": [
         {
           "name": "workspace-bot",
-          "botToken": "xoxb-...",
-          "appToken": "xapp-..."
+          "bot_token": "xoxb-...",
+          "app_token": "xapp-..."
         }
       ]
     },
@@ -199,11 +200,11 @@ Config lives at `~/.exe-os/gateway.json`. Each platform supports multiple accoun
       "accounts": [
         {
           "name": "notifications",
-          "smtpHost": "smtp.example.com",
-          "smtpPort": 587,
-          "smtpUser": "bot@example.com",
-          "smtpPass": "your-password",
-          "from": "bot@example.com"
+          "smtp_host": "smtp.example.com",
+          "smtp_port": "587",
+          "smtp_user": "bot@example.com",
+          "smtp_pass": "your-password",
+          "from_address": "bot@example.com"
         }
       ]
     }
@@ -214,8 +215,8 @@ Config lives at `~/.exe-os/gateway.json`. Each platform supports multiple accoun
 Pair each WhatsApp account separately:
 
 ```bash
-node /opt/exe-gateway/pair-whatsapp.mjs sales +1234567890
-node /opt/exe-gateway/pair-whatsapp.mjs support +0987654321
+sudo -u exe node /opt/exe-gateway/pair-whatsapp.mjs sales +1234567890
+sudo -u exe node /opt/exe-gateway/pair-whatsapp.mjs support +0987654321
 ```
 
 ## API Reference
@@ -234,7 +235,7 @@ All endpoints require the `Authorization: Bearer <token>` header (except `/healt
 ### Send a message
 
 ```bash
-curl -X POST http://localhost:3100/api/send \
+curl -X POST http://127.0.0.1:3100/api/send \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -250,13 +251,13 @@ The message enters the outbound queue and is sent with realistic typing simulati
 ### List groups
 
 ```bash
-curl -H "Authorization: Bearer <token>" http://localhost:3100/api/groups
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:3100/api/groups
 ```
 
 ### Check rate limits
 
 ```bash
-curl -H "Authorization: Bearer <token>" http://localhost:3100/api/limits
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:3100/api/limits
 ```
 
 ## Rate Limiting
@@ -423,6 +424,8 @@ The installer sets this up automatically. To configure manually:
 
 ```bash
 cp exe-gateway.service /etc/systemd/system/
+mkdir -p /etc/exe-gateway
+cp deploy/.env.example /etc/exe-gateway/exe-gateway.env
 systemctl daemon-reload
 systemctl enable --now exe-gateway
 ```
@@ -433,19 +436,19 @@ View logs:
 journalctl -u exe-gateway -f
 ```
 
-The service runs as a dedicated `exe` system user with security hardening (read-only filesystem, private tmp, no new privileges, 512MB memory cap).
+The service runs as a dedicated `exe` system user with security hardening. Tune `NODE_OPTIONS` and other secrets in `/etc/exe-gateway/exe-gateway.env`.
 
 ### Nginx reverse proxy
 
 For SSL termination and public-facing deployments:
 
 ```bash
-cp nginx-gateway.conf /etc/nginx/sites-available/gateway.yourdomain.com
-ln -s /etc/nginx/sites-available/gateway.yourdomain.com /etc/nginx/sites-enabled/
+cp nginx-gateway.conf /etc/nginx/sites-available/gateway.example.com
+ln -s /etc/nginx/sites-available/gateway.example.com /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
 ```
 
-Includes rate limiting (10 req/s webhooks, 5 conn/s WebSocket), CORS headers, and WebSocket upgrade support.
+Replace the example domain and certificate paths first. The template now proxies `/health`, `/webhook/*`, `/api/*`, and `/v1/*`, and includes an optional `/ws` block for the WebSocket relay.
 
 ### Docker
 
@@ -455,7 +458,8 @@ docker run -d \
   --name exe-gateway \
   -p 3100:3100 \
   -p 3101:3101 \
-  -v ~/.exe-os:/home/exegateway/.exe-os \
+  --env-file ./deploy/.env.example \
+  -v ./gateway-data:/data \
   exe-gateway
 ```
 

@@ -5,8 +5,7 @@
  * Supports legacy single-account format (`adapters.whatsapp.enabled: true`).
  */
 
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { getDefaultWhatsAppAuthDir } from "./config.js";
 
 export interface WhatsAppAccountConfig {
   /** Human-readable name for this account */
@@ -39,14 +38,14 @@ export function loadAccounts(
     // New multi-account format — fill in default authDirs
     cachedAccounts = whatsappConfig.accounts.map((a) => ({
       ...a,
-      authDir: a.authDir ?? join(homedir(), ".exe-os", ".auth", `whatsapp-${a.name}`),
+      authDir: a.authDir ?? getDefaultWhatsAppAuthDir(a.name),
     }));
   } else if (whatsappConfig.enabled) {
     // Legacy single-account format
     cachedAccounts = [
       {
         name: "default",
-        authDir: join(homedir(), ".exe-os", ".auth", "whatsapp-default"),
+        authDir: getDefaultWhatsAppAuthDir("default"),
       },
     ];
   } else {

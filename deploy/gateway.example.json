@@ -1,46 +1,40 @@
 {
   "port": 3100,
   "host": "127.0.0.1",
-  "authToken": "CHANGE_ME_random_secret_token",
-
-  "database": {
-    "host": "127.0.0.1",
-    "port": 5432,
-    "user": "exe_gateway",
-    "password": "CHANGE_ME",
-    "database": "exe_gateway"
-  },
-
+  "readOnly": false,
   "storageFilter": {
     "enabled": false
   },
-
+  "wsRelay": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 3101
+  },
   "adapters": {
     "whatsapp": {
       "enabled": true,
-      "proxy": "socks5://user:pass@default-proxy.example.com:1080",
       "accounts": [
-        { "name": "ro-1",  "readOnly": true },
-        { "name": "ro-2",  "readOnly": true },
-        { "name": "ro-3",  "readOnly": true },
-        { "name": "ro-4",  "readOnly": true, "proxy": "socks5://user:pass@proxy-2.example.com:1080" },
-        { "name": "ro-5",  "readOnly": true, "proxy": "socks5://user:pass@proxy-2.example.com:1080" },
-        { "name": "ro-6",  "readOnly": true, "proxy": "socks5://user:pass@proxy-2.example.com:1080" },
-        { "name": "ro-7",  "readOnly": true, "proxy": "socks5://user:pass@proxy-3.example.com:1080" },
-        { "name": "ro-8",  "readOnly": true, "proxy": "socks5://user:pass@proxy-3.example.com:1080" },
-        { "name": "ro-9",  "readOnly": true, "proxy": "socks5://user:pass@proxy-3.example.com:1080" },
-        { "name": "ro-10", "readOnly": true, "proxy": "socks5://user:pass@proxy-4.example.com:1080" },
-
-        { "name": "send-1", "proxy": "socks5://user:pass@proxy-4.example.com:1080" },
-        { "name": "send-2", "proxy": "socks5://user:pass@proxy-4.example.com:1080" },
-        { "name": "send-3", "proxy": "socks5://user:pass@proxy-5.example.com:1080" },
-        { "name": "send-4", "proxy": "socks5://user:pass@proxy-5.example.com:1080" },
-        { "name": "send-5", "proxy": "socks5://user:pass@proxy-5.example.com:1080" }
+        {
+          "name": "default",
+          "authDir": "/home/exe/.exe-os/.auth/whatsapp-default"
+        }
       ]
+    },
+    "telegram": {
+      "enabled": false,
+      "accounts": []
+    },
+    "discord": {
+      "enabled": false,
+      "accounts": []
+    },
+    "slack": {
+      "enabled": false,
+      "accounts": []
+    },
+    "email": {
+      "enabled": false,
+      "accounts": []
     }
-  },
-
-  "autoReply": {
-    "enabled": false
   }
 }

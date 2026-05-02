@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { WebhookServer } from "../src/webhook-server.js";
 
 const TEST_PORT = 19876; // unlikely to collide
-const TEST_HOST = "127.0.0.1"; // Bind to localhost in tests (prod defaults to 0.0.0.0)
+const TEST_HOST = "127.0.0.1"; // Bind to localhost in tests (same as the safer production default)
 
 /** Simple helper to make HTTP requests to the test server */
 async function req(

@@ -21,7 +21,7 @@ import { WebSocketServer, WebSocket } from "ws";
 const AUTH_TIMEOUT_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 10_000;
-const DEFAULT_HOST = "0.0.0.0";
+const DEFAULT_HOST = "127.0.0.1";
 const ALL_CHANNELS = "all";
 
 export interface WsRelayConfig {
@@ -30,12 +30,10 @@ export interface WsRelayConfig {
   authTokenHash: string;
 }
 
-export type GatewayEvent =
-  | { type: "message_received"; platform: string; senderId: string; text: string; timestamp: string }
-  | { type: "response_sent"; platform: string; senderId: string; text: string; botId: string; timestamp: string }
-  | { type: "agent_status"; agentId: string; status: "online" | "offline" | "busy" }
-  | { type: "health"; adapters: Record<string, boolean>; uptime: number }
-  | { type: "escalation"; platform: string; senderId: string; reason: string; timestamp: string };
+export type GatewayEvent = Record<string, unknown> & {
+  type: string;
+  platform?: string;
+};
 
 interface ClientState {
   authenticated: boolean;
@@ -71,7 +69,7 @@ export class WsRelay {
   /** Broadcast event to all authenticated clients, filtered by subscription */
   broadcast(event: GatewayEvent): void {
     const payload = JSON.stringify(event);
-    const platform = "platform" in event ? event.platform : null;
+    const platform = typeof event.platform === "string" ? event.platform : null;
 
     for (const [ws, state] of this.clients) {
       if (!state.authenticated) continue;
