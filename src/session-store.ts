@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { hasPool, getPrisma } from "./db.js";
+import { isInitialized, getPrisma } from "./db.js";
 import type Anthropic from "@anthropic-ai/sdk";
 
 export type SessionStatus = "active" | "closed" | "summarized";
@@ -47,7 +47,7 @@ export class SessionStore {
   getOrCreate(customerId: string, botId: string, platform: string): ConversationSession {
     const key = this.sessionKey(customerId, botId);
 
-    if (hasPool() && !this.loadedFromDB.has(key)) {
+    if (isInitialized() && !this.loadedFromDB.has(key)) {
       this.loadedFromDB.add(key);
       this.loadFromDB(customerId, botId).catch((err) => {
         console.error("[session-store] DB load error:", err instanceof Error ? err.message : err);
@@ -84,7 +84,7 @@ export class SessionStore {
 
   async getOrCreateAsync(customerId: string, botId: string, platform: string): Promise<ConversationSession> {
     const key = this.sessionKey(customerId, botId);
-    if (hasPool() && !this.sessions.has(key)) {
+    if (isInitialized() && !this.sessions.has(key)) {
       await this.loadFromDB(customerId, botId);
       this.loadedFromDB.add(key);
     }
@@ -183,7 +183,7 @@ export class SessionStore {
   }
 
   private async loadFromDB(customerId: string, botId: string): Promise<void> {
-    if (!hasPool()) return;
+    if (!isInitialized()) return;
 
     try {
       const prisma = await getPrisma();
@@ -227,7 +227,7 @@ export class SessionStore {
   }
 
   private persistSession(session: ConversationSession): void {
-    if (!hasPool()) return;
+    if (!isInitialized()) return;
 
     void getPrisma()
       .then((prisma) => prisma.gatewaySession.upsert({

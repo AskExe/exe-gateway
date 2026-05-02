@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { hasPool, getPrisma } from "./db.js";
+import { isInitialized, getPrisma } from "./db.js";
 
 export interface Customer {
   id: string;
@@ -28,7 +28,7 @@ export class CustomerStore {
   private memIdentities = new Map<string, string>();
 
   resolve(platform: string, senderId: string): Customer {
-    if (hasPool()) {
+    if (isInitialized()) {
       this.resolveDB(platform, senderId).catch((err) => {
         console.error("[customer-store] DB resolve error:", err instanceof Error ? err.message : err);
       });
@@ -37,7 +37,7 @@ export class CustomerStore {
   }
 
   async resolveAsync(platform: string, senderId: string): Promise<Customer> {
-    if (hasPool()) {
+    if (isInitialized()) {
       return this.resolveDB(platform, senderId);
     }
     return this.resolveInMemory(platform, senderId);
@@ -50,7 +50,7 @@ export class CustomerStore {
   }
 
   async findAsync(platform: string, senderId: string): Promise<Customer | undefined> {
-    if (!hasPool()) return this.find(platform, senderId);
+    if (!isInitialized()) return this.find(platform, senderId);
 
     try {
       const prisma = await getPrisma();
@@ -70,7 +70,7 @@ export class CustomerStore {
     const customer = this.memCustomers.get(customerId);
     if (customer) customer.name = name;
 
-    if (hasPool()) {
+    if (isInitialized()) {
       try {
         const prisma = await getPrisma();
         await prisma.gatewayCustomer.update({
@@ -87,7 +87,7 @@ export class CustomerStore {
     const customer = this.memCustomers.get(customerId);
     if (customer) customer.assignedEmployee = employee;
 
-    if (hasPool()) {
+    if (isInitialized()) {
       try {
         const prisma = await getPrisma();
         await prisma.gatewayCustomer.update({
@@ -105,7 +105,7 @@ export class CustomerStore {
   }
 
   async getIdentities(customerId: string): Promise<CustomerIdentity[]> {
-    if (!hasPool()) return [];
+    if (!isInitialized()) return [];
 
     try {
       const prisma = await getPrisma();

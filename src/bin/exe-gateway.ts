@@ -13,7 +13,7 @@ import { WebhookServer } from "../webhook-server.js";
 import { Gateway } from "../gateway.js";
 import { BotRegistry } from "../bot-registry.js";
 import { getHooks, setHooks } from "../hooks.js";
-import { initPool, closePool } from "../db.js";
+import { initDatabase, disconnect } from "../db.js";
 import { initConversationStore } from "../conversation-store.js";
 import { initAnalyticsStore } from "../analytics.js";
 import { setStorageFilter } from "../pipeline-store.js";
@@ -63,7 +63,7 @@ async function main(): Promise<void> {
   let dbReady = false;
   if (config.database) {
     try {
-      initPool(config.database);
+      initDatabase(config.database);
       await initConversationStore();
       await initAnalyticsStore();
       dbReady = true;
@@ -325,7 +325,7 @@ async function main(): Promise<void> {
       await wsRelay.stop();
     }
     await server.stop();
-    await closePool();
+    await disconnect();
     process.exit(0);
   };
 

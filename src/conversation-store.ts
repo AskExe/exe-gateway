@@ -8,7 +8,10 @@
  * @module conversation-store
  */
 
-import { getPool, getPrisma, type PrismaGatewayClient } from "./db.js";
+import { rawExecute, getPrisma, type PrismaClient } from "./db.js";
+
+// Re-export for consumers that reference PrismaGatewayClient
+export type PrismaGatewayClient = PrismaClient;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -77,31 +80,32 @@ export interface StoreMessageParams {
 // ---------------------------------------------------------------------------
 
 export async function initConversationStore(_db?: PrismaGatewayClient): Promise<void> {
-  const pool = getPool();
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS gateway_auto_reply_state (
+  const stmts = [
+    `CREATE TABLE IF NOT EXISTS gateway_auto_reply_state (
       id SERIAL PRIMARY KEY,
       sender_id TEXT NOT NULL,
       last_reply_at TIMESTAMPTZ NOT NULL,
       reply_date DATE NOT NULL DEFAULT CURRENT_DATE,
       UNIQUE(sender_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS gateway_daily_caps (
+    )`,
+    `CREATE TABLE IF NOT EXISTS gateway_daily_caps (
       id SERIAL PRIMARY KEY,
       cap_date DATE NOT NULL DEFAULT CURRENT_DATE,
       auto_reply_count INTEGER DEFAULT 0,
       UNIQUE(cap_date)
-    );
-  `);
+    )`,
+  ];
+
+  for (const sql of stmts) {
+    await rawExecute(sql);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Upserts
 // ---------------------------------------------------------------------------
 
-async function prismaClient(db?: PrismaGatewayClient): Promise<PrismaGatewayClient> {
+async function prismaClient(db?: PrismaClient): Promise<PrismaClient> {
   return db ?? getPrisma();
 }
 

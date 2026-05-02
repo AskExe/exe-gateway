@@ -1,15 +1,11 @@
 /**
  * LLM usage metering — tracks tokens, cost, and margin per customer.
  *
- * Every proxy request is logged to Postgres for billing and analytics.
+ * Every proxy request is logged via exe-db's billing schema (Prisma).
  * Cost is calculated from a model pricing table; margin is applied on top.
- *
- * Usage:
- *   await logUsage({ customerId: "hygo", model: "claude-sonnet-4-20250514", ... });
- *   const summary = await getUsageSummary("hygo", thirtyDaysAgo);
  */
 
-import { getPool } from "./db.js";
+import { getPrisma } from "./db.js";
 
 /**
  * Per-million-token pricing (USD).
@@ -71,31 +67,43 @@ export function calculateCost(
   return inputCost + outputCost;
 }
 
-/** Log a usage entry to Postgres */
+/**
+ * Resolve the BillingCustomer UUID from an authUserId.
+ * Returns null if customer not found.
+ */
+async function resolveCustomerUuid(authUserId: string): Promise<string | null> {
+  const prisma = await getPrisma();
+  const customer = await prisma.billingCustomer.findFirst({
+    where: { authUserId } as any,
+    select: { id: true },
+  } as any);
+  return customer?.id ?? null;
+}
+
+/** Log a usage entry via Prisma */
 export async function logUsage(entry: UsageEntry): Promise<void> {
-  const costUsd = calculateCost(
-    entry.model,
-    entry.inputTokens,
-    entry.outputTokens,
-  );
+  const costUsd = calculateCost(entry.model, entry.inputTokens, entry.outputTokens);
   const marginUsd = costUsd * (entry.marginPercent / 100);
 
-  const pool = getPool();
-  await pool.query(
-    `INSERT INTO llm_usage_logs
-     (customer_id, model, input_tokens, output_tokens, cost_usd, margin_usd, provider, latency_ms)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [
-      entry.customerId,
-      entry.model,
-      entry.inputTokens,
-      entry.outputTokens,
+  const customerUuid = await resolveCustomerUuid(entry.customerId);
+  if (!customerUuid) {
+    console.warn(`[metering] Customer not found: ${entry.customerId}`);
+    return;
+  }
+
+  const prisma = await getPrisma();
+  await prisma.billingUsageLog.create({
+    data: {
+      customerId: customerUuid,
+      model: entry.model,
+      inputTokens: entry.inputTokens,
+      outputTokens: entry.outputTokens,
       costUsd,
       marginUsd,
-      entry.provider,
-      entry.latencyMs,
-    ],
-  );
+      provider: entry.provider,
+      latencyMs: entry.latencyMs,
+    },
+  });
 }
 
 /** Get usage summary for a customer in a date range */
@@ -104,18 +112,42 @@ export async function getUsageSummary(
   since: Date,
   until: Date = new Date(),
 ): Promise<UsageSummary> {
-  const pool = getPool();
-  const result = await pool.query(
+  const customerUuid = await resolveCustomerUuid(customerId);
+  if (!customerUuid) {
+    return {
+      totalRequests: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCostUsd: 0,
+      totalMarginUsd: 0,
+      totalChargeUsd: 0,
+      byModel: {},
+    };
+  }
+
+  const prisma = await getPrisma();
+  const rows = await prisma.$queryRawUnsafe<
+    Array<{
+      model: string;
+      requests: number;
+      input_tokens: number;
+      output_tokens: number;
+      cost_usd: number;
+      margin_usd: number;
+    }>
+  >(
     `SELECT model,
             COUNT(*)::int AS requests,
             SUM(input_tokens)::int AS input_tokens,
             SUM(output_tokens)::int AS output_tokens,
             SUM(cost_usd)::float AS cost_usd,
             SUM(margin_usd)::float AS margin_usd
-     FROM llm_usage_logs
+     FROM billing.usage_logs
      WHERE customer_id = $1 AND created_at >= $2 AND created_at <= $3
      GROUP BY model`,
-    [customerId, since, until],
+    customerUuid,
+    since,
+    until,
   );
 
   let totalRequests = 0;
@@ -125,7 +157,7 @@ export async function getUsageSummary(
   let totalMarginUsd = 0;
   const byModel: UsageSummary["byModel"] = {};
 
-  for (const row of result.rows) {
+  for (const row of rows) {
     totalRequests += row.requests;
     totalInputTokens += row.input_tokens;
     totalOutputTokens += row.output_tokens;
@@ -164,23 +196,35 @@ export async function getDailyUsage(
     marginUsd: number;
   }>
 > {
-  const pool = getPool();
-  const result = await pool.query(
+  const customerUuid = await resolveCustomerUuid(customerId);
+  if (!customerUuid) return [];
+
+  const prisma = await getPrisma();
+  const rows = await prisma.$queryRawUnsafe<
+    Array<{
+      date: Date | string;
+      requests: number;
+      input_tokens: number;
+      output_tokens: number;
+      cost_usd: number;
+      margin_usd: number;
+    }>
+  >(
     `SELECT DATE(created_at) AS date,
             COUNT(*)::int AS requests,
             SUM(input_tokens)::int AS input_tokens,
             SUM(output_tokens)::int AS output_tokens,
             SUM(cost_usd)::float AS cost_usd,
             SUM(margin_usd)::float AS margin_usd
-     FROM llm_usage_logs
+     FROM billing.usage_logs
      WHERE customer_id = $1 AND created_at >= NOW() - INTERVAL '${days} days'
      GROUP BY DATE(created_at)
      ORDER BY date DESC`,
-    [customerId],
+    customerUuid,
   );
 
-  return result.rows.map((row) => ({
-    date: row.date,
+  return rows.map((row) => ({
+    date: typeof row.date === "string" ? row.date : (row.date as Date)?.toISOString?.().split("T")[0] ?? String(row.date),
     requests: row.requests,
     inputTokens: row.input_tokens,
     outputTokens: row.output_tokens,
@@ -189,27 +233,7 @@ export async function getDailyUsage(
   }));
 }
 
-/** Initialize the llm_usage_logs table */
+/** @deprecated Tables are managed by exe-db Prisma migrations. No-op. */
 export async function initUsageTable(): Promise<void> {
-  const pool = getPool();
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS llm_usage_logs (
-      id SERIAL PRIMARY KEY,
-      customer_id VARCHAR(64) NOT NULL,
-      model VARCHAR(64) NOT NULL,
-      input_tokens INTEGER NOT NULL,
-      output_tokens INTEGER NOT NULL,
-      cost_usd NUMERIC(10, 6) NOT NULL,
-      margin_usd NUMERIC(10, 6) NOT NULL,
-      provider VARCHAR(32) NOT NULL,
-      latency_ms INTEGER NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `);
-  await pool.query(
-    `CREATE INDEX IF NOT EXISTS idx_llm_usage_customer ON llm_usage_logs(customer_id, created_at)`,
-  );
-  await pool.query(
-    `CREATE INDEX IF NOT EXISTS idx_llm_usage_created ON llm_usage_logs(created_at)`,
-  );
+  // No-op — schema managed by exe-db migrations
 }

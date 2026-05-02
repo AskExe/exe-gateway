@@ -94,7 +94,9 @@ export {
 export { OutboundLimiter, PLATFORM_LIMITS, type PlatformLimits } from "./outbound-limiter.js";
 
 // Database
-export { initPool, getPool, closePool, type DBConfig } from "./db.js";
+export { initDatabase, getPrisma, disconnect, isInitialized, rawQuery, rawExecute, type DBConfig, type PrismaClient } from "./db.js";
+// Backward compat — deprecated
+export { initPool, getPool, closePool, hasPool } from "./db.js";
 
 // LLM Proxy
 export { handleProxyRequest, type LLMProxyConfig } from "./llm-proxy.js";

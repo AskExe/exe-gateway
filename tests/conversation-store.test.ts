@@ -1,9 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mockPool = {
-  query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
-  end: vi.fn(),
-};
+const mockRawExecute = vi.fn(async () => 0);
 
 const mockPrisma = {
   gatewayAccount: { upsert: vi.fn() },
@@ -13,11 +10,17 @@ const mockPrisma = {
 };
 
 vi.mock("../src/db.js", () => ({
-  getPool: () => mockPool,
   getPrisma: async () => mockPrisma,
+  rawExecute: (...args: unknown[]) => mockRawExecute(...args),
+  rawQuery: vi.fn(async () => []),
+  isInitialized: () => true,
+  initDatabase: () => {},
+  disconnect: async () => {},
   withTransaction: async (fn: (tx: typeof mockPrisma) => Promise<unknown>) => fn(mockPrisma),
+  // Backward compat
+  getPool: () => ({ query: vi.fn(async () => ({ rows: [], rowCount: 0 })), end: vi.fn() }),
   hasPool: () => true,
-  initPool: () => mockPool,
+  initPool: () => {},
   closePool: async () => {},
 }));
 
@@ -36,7 +39,7 @@ import {
 
 describe("conversation-store", () => {
   beforeEach(() => {
-    mockPool.query.mockClear();
+    mockRawExecute.mockClear();
     Object.values(mockPrisma).forEach((delegate: any) => {
       Object.values(delegate).forEach((fn: any) => fn.mockReset());
     });
@@ -44,10 +47,11 @@ describe("conversation-store", () => {
 
   it("initializes gateway helper tables", async () => {
     await initConversationStore();
-    expect(mockPool.query).toHaveBeenCalledTimes(1);
-    const sql = mockPool.query.mock.calls[0][0] as string;
-    expect(sql).toContain("gateway_auto_reply_state");
-    expect(sql).toContain("gateway_daily_caps");
+    expect(mockRawExecute).toHaveBeenCalledTimes(2);
+    const sql0 = mockRawExecute.mock.calls[0][0] as string;
+    const sql1 = mockRawExecute.mock.calls[1][0] as string;
+    expect(sql0).toContain("gateway_auto_reply_state");
+    expect(sql1).toContain("gateway_daily_caps");
   });
 
   it("upserts accounts via Prisma", async () => {

@@ -1,19 +1,13 @@
 /**
  * API key management for the LLM proxy.
  *
- * Keys are prefixed with `exe_sk_` and stored as SHA-256 hashes in Postgres.
+ * Keys are prefixed with `exe_sk_` and stored as SHA-256 hashes.
  * Validation is per-request with an in-memory cache (5 min TTL).
- *
- * Usage:
- *   const key = await createApiKey("hygo", "Hygo Co");
- *   // → "exe_sk_a1b2c3d4e5f6..."  (shown once, never stored in plaintext)
- *
- *   const customer = await validateApiKey("exe_sk_a1b2c3d4e5f6...");
- *   // → { id: "hygo", name: "Hygo Co", rateLimitRpm: 60 }
+ * Storage uses exe-db's billing schema via Prisma.
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { getPool } from "./db.js";
+import { getPrisma } from "./db.js";
 
 export interface CustomerInfo {
   id: string;
@@ -53,26 +47,26 @@ export async function validateApiKey(key: string): Promise<CustomerInfo | null> 
     return cached.customer;
   }
 
-  const pool = getPool();
-  const result = await pool.query(
-    `SELECT customer_id, customer_name, rate_limit_rpm
-     FROM llm_api_keys
-     WHERE key_hash = $1 AND revoked_at IS NULL`,
-    [hash],
-  );
+  const prisma = await getPrisma();
+  const apiKey = await prisma.billingApiKey.findFirst({
+    where: { keyHash: hash, revokedAt: null },
+    include: { customer: true },
+  } as any);
 
-  if (result.rows.length === 0) return null;
+  if (!apiKey) return null;
 
-  const row = result.rows[0];
   const customer: CustomerInfo = {
-    id: row.customer_id,
-    name: row.customer_name,
-    rateLimitRpm: row.rate_limit_rpm ?? 60,
+    id: apiKey.customer.authUserId,
+    name: apiKey.customer.name,
+    rateLimitRpm: apiKey.rateLimitRpm ?? 60,
   };
 
   // Update last_used_at (fire-and-forget)
-  pool
-    .query(`UPDATE llm_api_keys SET last_used_at = NOW() WHERE key_hash = $1`, [hash])
+  prisma.billingApiKey
+    .update({
+      where: { id: apiKey.id },
+      data: { lastUsedAt: new Date() },
+    })
     .catch(() => {});
 
   // Cache it
@@ -83,6 +77,7 @@ export async function validateApiKey(key: string): Promise<CustomerInfo | null> 
 
 /**
  * Create a new API key for a customer. Returns the raw key (shown once).
+ * Auto-provisions a BillingCustomer if one doesn't exist for this authUserId.
  */
 export async function createApiKey(
   customerId: string,
@@ -93,12 +88,27 @@ export async function createApiKey(
   const hash = hashApiKey(key);
   const prefix = keyPrefix(key);
 
-  const pool = getPool();
-  await pool.query(
-    `INSERT INTO llm_api_keys (key_prefix, key_hash, customer_id, customer_name, rate_limit_rpm)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [prefix, hash, customerId, customerName, rateLimitRpm],
-  );
+  const prisma = await getPrisma();
+
+  // Ensure customer exists
+  const customer = await prisma.billingCustomer.upsert({
+    where: { authUserId: customerId } as any,
+    create: {
+      authUserId: customerId,
+      name: customerName,
+      email: "",
+    },
+    update: {},
+  } as any);
+
+  await prisma.billingApiKey.create({
+    data: {
+      keyPrefix: prefix,
+      keyHash: hash,
+      customerId: customer.id,
+      rateLimitRpm,
+    },
+  });
 
   return key;
 }
@@ -107,17 +117,24 @@ export async function createApiKey(
  * Revoke an API key by its prefix.
  */
 export async function revokeApiKey(prefix: string): Promise<boolean> {
-  const pool = getPool();
-  const result = await pool.query(
-    `UPDATE llm_api_keys SET revoked_at = NOW()
-     WHERE key_prefix = $1 AND revoked_at IS NULL`,
-    [prefix],
-  );
+  const prisma = await getPrisma();
 
-  // Clear cache — key is revoked
+  const apiKey = await prisma.billingApiKey.findFirst({
+    where: { keyPrefix: prefix, revokedAt: null },
+  } as any);
+
+  if (!apiKey) {
+    cache.clear();
+    return false;
+  }
+
+  await prisma.billingApiKey.update({
+    where: { id: apiKey.id },
+    data: { revokedAt: new Date() },
+  });
+
   cache.clear();
-
-  return (result.rowCount ?? 0) > 0;
+  return true;
 }
 
 /** List all active API keys (prefixes only — never expose full keys) */
@@ -131,41 +148,26 @@ export async function listApiKeys(): Promise<
     lastUsedAt: string | null;
   }>
 > {
-  const pool = getPool();
-  const result = await pool.query(
-    `SELECT key_prefix, customer_id, customer_name, rate_limit_rpm, created_at, last_used_at
-     FROM llm_api_keys
-     WHERE revoked_at IS NULL
-     ORDER BY created_at DESC`,
-  );
+  const prisma = await getPrisma();
+  const keys = await prisma.billingApiKey.findMany({
+    where: { revokedAt: null },
+    include: { customer: true },
+    orderBy: { createdAt: "desc" },
+  } as any);
 
-  return result.rows.map((row) => ({
-    prefix: row.key_prefix,
-    customerId: row.customer_id,
-    customerName: row.customer_name,
-    rateLimitRpm: row.rate_limit_rpm,
-    createdAt: row.created_at,
-    lastUsedAt: row.last_used_at,
+  return keys.map((key: any) => ({
+    prefix: key.keyPrefix,
+    customerId: key.customer.authUserId,
+    customerName: key.customer.name,
+    rateLimitRpm: key.rateLimitRpm,
+    createdAt: key.createdAt instanceof Date ? key.createdAt.toISOString() : String(key.createdAt),
+    lastUsedAt: key.lastUsedAt
+      ? key.lastUsedAt instanceof Date ? key.lastUsedAt.toISOString() : String(key.lastUsedAt)
+      : null,
   }));
 }
 
-/** Initialize the llm_api_keys table */
+/** @deprecated Tables are managed by exe-db Prisma migrations. No-op. */
 export async function initApiKeysTable(): Promise<void> {
-  const pool = getPool();
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS llm_api_keys (
-      id SERIAL PRIMARY KEY,
-      key_prefix VARCHAR(12) NOT NULL,
-      key_hash VARCHAR(64) NOT NULL UNIQUE,
-      customer_id VARCHAR(64) NOT NULL,
-      customer_name VARCHAR(255) NOT NULL,
-      rate_limit_rpm INTEGER DEFAULT 60,
-      created_at TIMESTAMP DEFAULT NOW(),
-      revoked_at TIMESTAMP,
-      last_used_at TIMESTAMP
-    )
-  `);
-  await pool.query(
-    `CREATE INDEX IF NOT EXISTS idx_llm_api_keys_hash ON llm_api_keys(key_hash)`,
-  );
+  // No-op — schema managed by exe-db migrations
 }

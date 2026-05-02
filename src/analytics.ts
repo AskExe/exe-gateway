@@ -6,7 +6,7 @@
  * Falls back to pure in-memory when no DB is configured.
  */
 
-import { hasPool, getPool } from "./db.js";
+import { isInitialized, getPrisma, rawQuery, rawExecute } from "./db.js";
 
 export interface AnalyticsEvent {
   timestamp: string;
@@ -41,11 +41,10 @@ const RAW_EVENT_TTL_MS = 30 * 24 * 60 * 60_000; // 30 days
  * Called from initConversationStore or standalone.
  */
 export async function initAnalyticsStore(): Promise<void> {
-  if (!hasPool()) return;
-  const pool = getPool();
+  if (!isInitialized()) return;
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS gateway_analytics_events (
+  const stmts = [
+    `CREATE TABLE IF NOT EXISTS gateway_analytics_events (
       id SERIAL PRIMARY KEY,
       timestamp TIMESTAMPTZ NOT NULL,
       platform TEXT NOT NULL,
@@ -57,9 +56,8 @@ export async function initAnalyticsStore(): Promise<void> {
       provider TEXT,
       success BOOLEAN NOT NULL DEFAULT true,
       created_at TIMESTAMPTZ DEFAULT now()
-    );
-
-    CREATE TABLE IF NOT EXISTS gateway_analytics_daily (
+    )`,
+    `CREATE TABLE IF NOT EXISTS gateway_analytics_daily (
       id SERIAL PRIMARY KEY,
       date DATE NOT NULL,
       platform TEXT NOT NULL,
@@ -74,12 +72,15 @@ export async function initAnalyticsStore(): Promise<void> {
       error_count INTEGER DEFAULT 0,
       updated_at TIMESTAMPTZ DEFAULT now(),
       UNIQUE(date, platform, bot_id)
-    );
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_analytics_events_ts ON gateway_analytics_events(timestamp)`,
+    `CREATE INDEX IF NOT EXISTS idx_analytics_events_type ON gateway_analytics_events(event_type, platform)`,
+    `CREATE INDEX IF NOT EXISTS idx_analytics_daily_date ON gateway_analytics_daily(date)`,
+  ];
 
-    CREATE INDEX IF NOT EXISTS idx_analytics_events_ts ON gateway_analytics_events(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_analytics_events_type ON gateway_analytics_events(event_type, platform);
-    CREATE INDEX IF NOT EXISTS idx_analytics_daily_date ON gateway_analytics_daily(date);
-  `);
+  for (const sql of stmts) {
+    await rawExecute(sql);
+  }
 }
 
 export class AnalyticsCollector {
@@ -200,12 +201,11 @@ export class AnalyticsCollector {
    * Falls back to in-memory if no DB configured.
    */
   async getDailyStatsAsync(date?: string): Promise<DailyStats[]> {
-    if (!hasPool()) return this.getDailyStats(date);
+    if (!isInitialized()) return this.getDailyStats(date);
 
     const targetDate = date ?? new Date().toISOString().split("T")[0]!;
     try {
-      const pool = getPool();
-      const result = await pool.query(
+      const rows = await rawQuery(
         `SELECT date, platform, bot_id, conversations, messages,
                 avg_latency_ms, avg_messages_per_conversation,
                 escalation_count, total_input_tokens, total_output_tokens,
@@ -216,8 +216,8 @@ export class AnalyticsCollector {
         [targetDate],
       );
 
-      if (result.rows.length > 0) {
-        return result.rows.map(rowToDailyStats);
+      if (rows.length > 0) {
+        return rows.map(rowToDailyStats);
       }
     } catch (err) {
       console.error("[analytics] DB query error:", err instanceof Error ? err.message : err);
@@ -301,16 +301,15 @@ export class AnalyticsCollector {
    * Call periodically (e.g., every 5 minutes) or on graceful shutdown.
    */
   async flushDailyStats(): Promise<void> {
-    if (!hasPool()) return;
+    if (!isInitialized()) return;
 
     const today = new Date().toISOString().split("T")[0]!;
     const stats = this.getDailyStats(today);
     if (stats.length === 0) return;
 
     try {
-      const pool = getPool();
       for (const s of stats) {
-        await pool.query(
+        await rawExecute(
           `INSERT INTO gateway_analytics_daily
              (date, platform, bot_id, conversations, messages, avg_latency_ms,
               avg_messages_per_conversation, escalation_count,
@@ -348,29 +347,27 @@ export class AnalyticsCollector {
    * Persist a single event to PostgreSQL (fire-and-forget).
    */
   private persistEvent(event: AnalyticsEvent): void {
-    if (!hasPool()) return;
+    if (!isInitialized()) return;
 
-    getPool()
-      .query(
-        `INSERT INTO gateway_analytics_events
-           (timestamp, platform, bot_id, event_type, latency_ms,
-            input_tokens, output_tokens, provider, success)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [
-          event.timestamp,
-          event.platform,
-          event.botId,
-          event.eventType,
-          event.latencyMs ?? null,
-          event.inputTokens ?? null,
-          event.outputTokens ?? null,
-          event.provider ?? null,
-          event.success,
-        ],
-      )
-      .catch((err) => {
-        console.error("[analytics] DB persist error:", err instanceof Error ? err.message : err);
-      });
+    rawExecute(
+      `INSERT INTO gateway_analytics_events
+         (timestamp, platform, bot_id, event_type, latency_ms,
+          input_tokens, output_tokens, provider, success)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        event.timestamp,
+        event.platform,
+        event.botId,
+        event.eventType,
+        event.latencyMs ?? null,
+        event.inputTokens ?? null,
+        event.outputTokens ?? null,
+        event.provider ?? null,
+        event.success,
+      ],
+    ).catch((err) => {
+      console.error("[analytics] DB persist error:", err instanceof Error ? err.message : err);
+    });
   }
 }
 
