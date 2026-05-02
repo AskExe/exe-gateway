@@ -1,275 +1,208 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-
-// ---------------------------------------------------------------------------
-// Mock pg.Pool
-// ---------------------------------------------------------------------------
-
-let queryResults: Record<string, unknown>[] = [];
-let queryLog: Array<{ sql: string; args: unknown[] }> = [];
-
-const mockQuery = vi.fn(async (sql: string, args?: unknown[]) => {
-  queryLog.push({ sql, args: args ?? [] });
-
-  // Auto-return RETURNING id rows
-  if (sql.includes("RETURNING id")) {
-    const nextId = queryResults.length > 0 ? queryResults.shift() : { id: 1 };
-    return { rows: [nextId], rowCount: 1 };
-  }
-
-  // SELECT queries
-  if (sql.trimStart().startsWith("SELECT")) {
-    const rows = queryResults.splice(0);
-    return { rows, rowCount: rows.length };
-  }
-
-  // DDL / UPDATE
-  return { rows: [], rowCount: 0 };
-});
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockPool = {
-  query: mockQuery,
+  query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
   end: vi.fn(),
 };
 
-vi.mock("pg", () => ({
-  default: { Pool: vi.fn(() => mockPool) },
-}));
+const mockPrisma = {
+  gatewayAccount: { upsert: vi.fn() },
+  gatewayContact: { upsert: vi.fn(), findMany: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
+  gatewayThread: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), findMany: vi.fn() },
+  gatewayMessage: { findFirst: vi.fn(), create: vi.fn(), findMany: vi.fn() },
+};
 
 vi.mock("../src/db.js", () => ({
   getPool: () => mockPool,
+  getPrisma: async () => mockPrisma,
+  withTransaction: async (fn: (tx: typeof mockPrisma) => Promise<unknown>) => fn(mockPrisma),
+  hasPool: () => true,
   initPool: () => mockPool,
   closePool: async () => {},
 }));
 
 import {
+  getContactDetail,
+  getContacts,
+  getThreadMessages,
+  getThreads,
   initConversationStore,
+  linkContactToCRM,
+  storeMessage,
   upsertAccount,
   upsertContact,
   upsertThread,
-  storeMessage,
-  getThreadMessages,
-  getThreads,
-  linkContactToCRM,
 } from "../src/conversation-store.js";
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 describe("conversation-store", () => {
   beforeEach(() => {
-    mockQuery.mockClear();
-    queryLog = [];
-    queryResults = [];
-  });
-
-  describe("initConversationStore", () => {
-    it("creates all 4 tables and 5 indexes", async () => {
-      await initConversationStore(mockPool as never);
-
-      expect(mockQuery).toHaveBeenCalledTimes(1);
-      const sql = mockQuery.mock.calls[0][0] as string;
-      expect(sql).toContain("CREATE TABLE IF NOT EXISTS gateway_accounts");
-      expect(sql).toContain("CREATE TABLE IF NOT EXISTS gateway_contacts");
-      expect(sql).toContain("CREATE TABLE IF NOT EXISTS gateway_threads");
-      expect(sql).toContain("CREATE TABLE IF NOT EXISTS gateway_messages");
-      expect(sql).toContain("idx_messages_thread");
-      expect(sql).toContain("idx_messages_account");
-      expect(sql).toContain("idx_contacts_phone");
-      expect(sql).toContain("idx_contacts_crm");
-      expect(sql).toContain("idx_threads_account");
+    mockPool.query.mockClear();
+    Object.values(mockPrisma).forEach((delegate: any) => {
+      Object.values(delegate).forEach((fn: any) => fn.mockReset());
     });
   });
 
-  describe("upsertAccount", () => {
-    it("returns account id on insert", async () => {
-      queryResults = [{ id: 42 }];
-      const id = await upsertAccount("whatsapp", "main-account", undefined, mockPool as never);
-      expect(id).toBe(42);
-    });
-
-    it("is idempotent (ON CONFLICT)", async () => {
-      queryResults = [{ id: 42 }];
-      await upsertAccount("whatsapp", "main-account", undefined, mockPool as never);
-
-      const sql = queryLog[0].sql;
-      expect(sql).toContain("ON CONFLICT");
-      expect(sql).toContain("RETURNING id");
-    });
-
-    it("passes platform_id when provided", async () => {
-      queryResults = [{ id: 5 }];
-      await upsertAccount("whatsapp", "acct", "plat-123", mockPool as never);
-
-      expect(queryLog[0].args).toContain("plat-123");
-    });
+  it("initializes gateway helper tables", async () => {
+    await initConversationStore();
+    expect(mockPool.query).toHaveBeenCalledTimes(1);
+    const sql = mockPool.query.mock.calls[0][0] as string;
+    expect(sql).toContain("gateway_auto_reply_state");
+    expect(sql).toContain("gateway_daily_caps");
   });
 
-  describe("upsertContact", () => {
-    it("returns contact id", async () => {
-      queryResults = [{ id: 7 }];
-      const id = await upsertContact("whatsapp", "+1234567890", undefined, mockPool as never);
-      expect(id).toBe(7);
-    });
-
-    it("passes optional fields", async () => {
-      queryResults = [{ id: 7 }];
-      await upsertContact(
-        "whatsapp",
-        "+1234567890",
-        { phone: "+1234567890", displayName: "Jane", pushName: "Janie" },
-        mockPool as never,
-      );
-
-      const args = queryLog[0].args;
-      expect(args).toContain("+1234567890");
-      expect(args).toContain("Jane");
-      expect(args).toContain("Janie");
-    });
-
-    it("uses ON CONFLICT for idempotency", async () => {
-      queryResults = [{ id: 7 }];
-      await upsertContact("whatsapp", "+1234567890", undefined, mockPool as never);
-      expect(queryLog[0].sql).toContain("ON CONFLICT");
-    });
+  it("upserts accounts via Prisma", async () => {
+    mockPrisma.gatewayAccount.upsert.mockResolvedValue({ id: 42 });
+    const id = await upsertAccount("whatsapp", "main-account", "platform-1");
+    expect(id).toBe(42);
+    expect(mockPrisma.gatewayAccount.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { platform_accountName: { platform: "whatsapp", accountName: "main-account" } },
+      }),
+    );
   });
 
-  describe("storeMessage", () => {
-    it("inserts message and updates thread stats", async () => {
-      // First result: dedup SELECT returns empty (no existing message)
-      // Second result: INSERT RETURNING id returns { id: 100 }
-      queryResults = [{ id: 100 }];
-      // Override the mock to return empty for the dedup SELECT, then normal for INSERT
-      mockQuery.mockImplementationOnce(async (sql: string, args?: unknown[]) => {
-        queryLog.push({ sql, args: args ?? [] });
-        return { rows: [], rowCount: 0 }; // Dedup: no existing message
-      });
+  it("upserts contacts via Prisma and preserves optional fields", async () => {
+    mockPrisma.gatewayContact.upsert.mockResolvedValue({ id: 7 });
+    const id = await upsertContact("whatsapp", "jid-1", {
+      phone: "+123",
+      displayName: "Jane",
+      pushName: "Janie",
+      lid: "ignored-lid",
+    });
+    expect(id).toBe(7);
+    expect(mockPrisma.gatewayContact.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { platform_platformJid: { platform: "whatsapp", platformJid: "jid-1" } },
+        create: expect.objectContaining({ phone: "+123", displayName: "Jane", pushName: "Janie" }),
+      }),
+    );
+  });
 
-      const id = await storeMessage(
-        {
-          threadId: 1,
-          accountId: 2,
-          messageId: "msg-001",
-          fromJid: "+1234567890",
-          text: "Hello",
-          timestamp: "2026-04-27T10:00:00Z",
+  it("reuses existing thread when present", async () => {
+    mockPrisma.gatewayThread.findFirst.mockResolvedValue({ id: 9 });
+    mockPrisma.gatewayThread.update.mockResolvedValue({ id: 9 });
+    const id = await upsertThread(1, 2);
+    expect(id).toBe(9);
+    expect(mockPrisma.gatewayThread.update).toHaveBeenCalled();
+    expect(mockPrisma.gatewayThread.create).not.toHaveBeenCalled();
+  });
+
+  it("stores messages via Prisma and updates thread stats", async () => {
+    mockPrisma.gatewayMessage.findFirst.mockResolvedValue(null);
+    mockPrisma.gatewayMessage.create.mockResolvedValue({ id: 100 });
+    mockPrisma.gatewayThread.update.mockResolvedValue({ id: 1 });
+
+    const id = await storeMessage({
+      threadId: 1,
+      accountId: 2,
+      messageId: "msg-001",
+      fromJid: "+1234567890",
+      text: "Hello",
+      timestamp: "2026-04-27T10:00:00Z",
+      rawPayload: { key: "value" },
+    });
+
+    expect(id).toBe(100);
+    expect(mockPrisma.gatewayMessage.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ rawPayload: { key: "value" } }),
+      }),
+    );
+    expect(mockPrisma.gatewayThread.update).toHaveBeenCalled();
+  });
+
+  it("returns existing message id when dedupe matches", async () => {
+    mockPrisma.gatewayMessage.findFirst.mockResolvedValue({ id: 55 });
+    const id = await storeMessage({
+      threadId: 1,
+      accountId: 2,
+      messageId: "msg-001",
+      fromJid: "+1234567890",
+      timestamp: "2026-04-27T10:00:00Z",
+    });
+    expect(id).toBe(55);
+    expect(mockPrisma.gatewayMessage.create).not.toHaveBeenCalled();
+  });
+
+  it("maps thread messages from Prisma records", async () => {
+    mockPrisma.gatewayMessage.findMany.mockResolvedValue([
+      {
+        id: 2,
+        threadId: 1,
+        accountId: 1,
+        messageId: "msg-002",
+        fromJid: "+1234567890",
+        fromMe: false,
+        text: "Second",
+        mediaType: null,
+        mediaUrl: null,
+        timestamp: new Date("2026-04-27T11:00:00Z"),
+        isHistorical: false,
+        rawPayload: null,
+        createdAt: new Date("2026-04-27T11:00:00Z"),
+      },
+    ]);
+
+    const messages = await getThreadMessages(1);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].text).toBe("Second");
+    expect(messages[0].pushName).toBeNull();
+  });
+
+  it("maps threads with included contacts", async () => {
+    mockPrisma.gatewayThread.findMany.mockResolvedValue([
+      {
+        id: 1,
+        accountId: 1,
+        contactId: 5,
+        groupJid: null,
+        groupName: null,
+        lastMessage: new Date("2026-04-27T10:00:00Z"),
+        messageCount: 3,
+        contact: {
+          platformJid: "+1234567890@s.whatsapp.net",
+          displayName: "Jane Doe",
+          phone: "+1234567890",
         },
-        mockPool as never,
-      );
+      },
+    ]);
 
-      expect(id).toBe(100);
-      // Should have 3 queries: dedup check SELECT + INSERT + UPDATE thread stats
-      expect(queryLog).toHaveLength(3);
-      expect(queryLog[0].sql).toContain("SELECT id FROM gateway_messages");
-      expect(queryLog[2].sql).toContain("UPDATE gateway_threads");
-      expect(queryLog[2].sql).toContain("message_count = message_count + 1");
-    });
-
-    it("stores raw_payload as JSON", async () => {
-      queryResults = [{ id: 101 }];
-      // Return empty for dedup SELECT
-      mockQuery.mockImplementationOnce(async (sql: string, args?: unknown[]) => {
-        queryLog.push({ sql, args: args ?? [] });
-        return { rows: [], rowCount: 0 };
-      });
-
-      await storeMessage(
-        {
-          threadId: 1,
-          accountId: 2,
-          messageId: "msg-002",
-          fromJid: "+1234567890",
-          timestamp: "2026-04-27T10:00:00Z",
-          rawPayload: { key: "value" },
-        },
-        mockPool as never,
-      );
-
-      // queryLog[0] is dedup SELECT, queryLog[1] is the INSERT
-      const args = queryLog[1].args;
-      expect(args).toContain('{"key":"value"}');
-    });
+    const threads = await getThreads({ accountId: 1 });
+    expect(threads).toHaveLength(1);
+    expect(threads[0].contactName).toBe("Jane Doe");
+    expect(threads[0].contactPlatformJid).toBe("+1234567890@s.whatsapp.net");
   });
 
-  describe("getThreadMessages", () => {
-    it("returns messages newest first", async () => {
-      queryResults = [
-        {
-          id: 2,
-          thread_id: 1,
-          account_id: 1,
-          message_id: "msg-002",
-          from_jid: "+1234567890",
-          from_me: false,
-          text: "Second",
-          push_name: "Jane",
-          media_type: null,
-          media_url: null,
-          timestamp: "2026-04-27T11:00:00Z",
-          is_historical: false,
-          raw_payload: null,
-          created_at: "2026-04-27T11:00:00Z",
-        },
-        {
-          id: 1,
-          thread_id: 1,
-          account_id: 1,
-          message_id: "msg-001",
-          from_jid: "+1234567890",
-          from_me: false,
-          text: "First",
-          push_name: "Jane",
-          media_type: null,
-          media_url: null,
-          timestamp: "2026-04-27T10:00:00Z",
-          is_historical: false,
-          raw_payload: null,
-          created_at: "2026-04-27T10:00:00Z",
-        },
-      ];
+  it("maps contacts and contact detail", async () => {
+    const contactRecord = {
+      id: 3,
+      platform: "whatsapp",
+      platformJid: "jid-3",
+      phone: "+123",
+      displayName: "Jane",
+      pushName: "Janie",
+      crmPersonId: "crm-1",
+      createdAt: new Date("2026-04-27T10:00:00Z"),
+      updatedAt: new Date("2026-04-27T10:00:00Z"),
+    };
+    mockPrisma.gatewayContact.findMany.mockResolvedValue([contactRecord]);
+    mockPrisma.gatewayContact.findUnique.mockResolvedValue(contactRecord);
 
-      const messages = await getThreadMessages(1, 50, 0, mockPool as never);
+    const contacts = await getContacts({ platform: "whatsapp" });
+    const detail = await getContactDetail(3);
 
-      expect(messages).toHaveLength(2);
-      expect(messages[0].text).toBe("Second");
-      expect(messages[1].text).toBe("First");
-      expect(queryLog[0].sql).toContain("ORDER BY timestamp DESC");
-    });
+    expect(contacts[0].lid).toBeNull();
+    expect(detail?.crmPersonId).toBe("crm-1");
   });
 
-  describe("getThreads", () => {
-    it("joins with contacts and returns enriched threads", async () => {
-      queryResults = [
-        {
-          id: 1,
-          account_id: 1,
-          contact_id: 5,
-          group_jid: null,
-          group_name: null,
-          last_message: "2026-04-27T10:00:00Z",
-          message_count: 3,
-          contact_name: "Jane Doe",
-          contact_phone: "+1234567890",
-          contact_platform_jid: "+1234567890@s.whatsapp.net",
-        },
-      ];
-
-      const threads = await getThreads({ accountId: 1 }, mockPool as never);
-
-      expect(threads).toHaveLength(1);
-      expect(threads[0].contactName).toBe("Jane Doe");
-      expect(threads[0].messageCount).toBe(3);
-      expect(queryLog[0].sql).toContain("JOIN gateway_contacts");
-    });
-  });
-
-  describe("linkContactToCRM", () => {
-    it("updates crm_person_id on contact", async () => {
-      await linkContactToCRM(7, "crm-person-42", mockPool as never);
-
-      expect(queryLog[0].sql).toContain("UPDATE gateway_contacts");
-      expect(queryLog[0].args).toContain("crm-person-42");
-      expect(queryLog[0].args).toContain(7);
-    });
+  it("links contacts to CRM via Prisma", async () => {
+    mockPrisma.gatewayContact.update.mockResolvedValue({ id: 3 });
+    await linkContactToCRM(3, "crm-99");
+    expect(mockPrisma.gatewayContact.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 3 },
+        data: expect.objectContaining({ crmPersonId: "crm-99" }),
+      }),
+    );
   });
 });

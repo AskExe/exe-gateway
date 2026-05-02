@@ -8,7 +8,7 @@
  */
 
 import type { NormalizedMessage } from "./types.js";
-import { getPool } from "./db.js";
+import { getPrisma, withTransaction } from "./db.js";
 import { upsertContact, linkContactToCRM } from "./conversation-store.js";
 
 // ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ export async function importContactFromMessage(
 ): Promise<number | null> {
   const phone = msg.senderPhone ?? parsePhoneFromJid(msg.senderId);
 
-  const pool = getPool();
+  const prisma = await getPrisma();
   const contactId = await upsertContact(
     msg.platform,
     msg.senderId,
@@ -66,7 +66,7 @@ export async function importContactFromMessage(
       displayName: msg.senderName,
       pushName: msg.senderName,
     },
-    pool,
+    prisma,
   );
 
   return contactId;
@@ -87,36 +87,24 @@ export async function bulkImportContacts(
 ): Promise<number> {
   if (contacts.length === 0) return 0;
 
-  const pool = getPool();
-  const client = await pool.connect();
   let count = 0;
 
-  try {
-    await client.query("BEGIN");
-
+  await withTransaction(async (prisma) => {
     for (const c of contacts) {
       const phone = c.phone ?? parsePhoneFromJid(c.platformJid);
-      await client.query(
-        `INSERT INTO gateway_contacts (platform, platform_jid, phone, display_name, push_name)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (platform, platform_jid)
-         DO UPDATE SET
-           phone = COALESCE(EXCLUDED.phone, gateway_contacts.phone),
-           display_name = COALESCE(EXCLUDED.display_name, gateway_contacts.display_name),
-           push_name = COALESCE(EXCLUDED.push_name, gateway_contacts.push_name),
-           updated_at = now()`,
-        [platform, c.platformJid, phone, c.displayName ?? null, c.pushName ?? null],
+      await upsertContact(
+        platform,
+        c.platformJid,
+        {
+          phone: phone ?? undefined,
+          displayName: c.displayName,
+          pushName: c.pushName,
+        },
+        prisma,
       );
       count++;
     }
-
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 
   return count;
 }
@@ -142,8 +130,8 @@ export async function tryCRMLink(
     const personId = await findPersonByContact("whatsapp", phone);
     if (!personId) return false;
 
-    const pool = getPool();
-    await linkContactToCRM(contactId, personId, pool);
+    const prisma = await getPrisma();
+    await linkContactToCRM(contactId, personId, prisma);
     return true;
   } catch {
     // CRM linking is best-effort — never fail

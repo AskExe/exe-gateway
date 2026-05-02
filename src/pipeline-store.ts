@@ -7,7 +7,6 @@
  */
 
 import type { NormalizedMessage } from "./types.js";
-import { getPool } from "./db.js";
 import {
   upsertAccount,
   upsertContact,
@@ -62,13 +61,11 @@ export async function storeInboundMessage(msg: NormalizedMessage): Promise<numbe
     return -1; // Filtered out
   }
 
-  const pool = getPool();
 
   const accountId = await upsertAccount(
     msg.platform,
     msg.accountId ?? `${msg.platform}-default`,
     undefined,
-    pool,
   );
 
   const contactId = await upsertContact(
@@ -79,11 +76,10 @@ export async function storeInboundMessage(msg: NormalizedMessage): Promise<numbe
       displayName: msg.senderName,
       pushName: msg.senderName,
     },
-    pool,
   );
 
   const groupJid = msg.chatType === "group" ? msg.channelId : undefined;
-  const threadId = await upsertThread(accountId, contactId, groupJid, pool);
+  const threadId = await upsertThread(accountId, contactId, groupJid);
 
   const messageId = await storeMessage(
     {
@@ -100,7 +96,6 @@ export async function storeInboundMessage(msg: NormalizedMessage): Promise<numbe
       isHistorical: msg.isHistorical ?? false,
       rawPayload: msg.raw,
     },
-    pool,
   );
 
   // Auto-import contact + try CRM linking (fire-and-forget, but log errors)
@@ -131,13 +126,11 @@ export async function storeConversation(
   response: string,
   botId: string,
 ): Promise<{ inboundId: number; responseId: number }> {
-  const pool = getPool();
 
   const accountId = await upsertAccount(
     msg.platform,
     msg.accountId ?? `${msg.platform}-default`,
     undefined,
-    pool,
   );
 
   const contactId = await upsertContact(
@@ -148,11 +141,10 @@ export async function storeConversation(
       displayName: msg.senderName,
       pushName: msg.senderName,
     },
-    pool,
   );
 
   const groupJid = msg.chatType === "group" ? msg.channelId : undefined;
-  const threadId = await upsertThread(accountId, contactId, groupJid, pool);
+  const threadId = await upsertThread(accountId, contactId, groupJid);
 
   const inboundId = await storeMessage(
     {
@@ -169,7 +161,6 @@ export async function storeConversation(
       isHistorical: msg.isHistorical ?? false,
       rawPayload: msg.raw,
     },
-    pool,
   );
 
   const responseId = await storeMessage(
@@ -183,7 +174,6 @@ export async function storeConversation(
       pushName: botId,
       timestamp: new Date().toISOString(),
     },
-    pool,
   );
 
   return { inboundId, responseId };
