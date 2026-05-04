@@ -80,8 +80,8 @@ ensure_service_user() {
     useradd -r -s /bin/false -d /home/exe -m exe
   fi
 
-  install -d -o exe -g exe "$STATE_DIR"
-  install -d -o exe -g exe "$STATE_DIR/.auth"
+  install -d -m 700 -o exe -g exe "$STATE_DIR"
+  install -d -m 700 -o exe -g exe "$STATE_DIR/.auth"
 }
 
 read_existing_secret() {
@@ -104,17 +104,66 @@ ensure_env_setting() {
   printf '%s=%s\n' "$key" "$value" >> "$file"
 }
 
+upsert_env_setting() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+
+  if [ ! -f "$file" ]; then
+    printf '%s=%s\n' "$key" "$value" > "$file"
+    return
+  fi
+
+  tmp="$(mktemp)"
+  awk -F= -v key="$key" -v value="$value" '
+    BEGIN { updated = 0 }
+    $1 == key { print key "=" value; updated = 1; next }
+    { print }
+    END { if (!updated) print key "=" value }
+  ' "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
+remove_env_setting() {
+  local file="$1"
+  local key="$2"
+  local tmp
+
+  if [ ! -f "$file" ]; then
+    return
+  fi
+
+  tmp="$(mktemp)"
+  awk -F= -v key="$key" '$1 != key { print }' "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
+sha256_hex() {
+  printf '%s' "$1" | openssl dgst -sha256 -r | awk '{print $1}'
+}
+
 ensure_env_file() {
   local auth_token
-  auth_token="$(read_existing_secret "$ENV_FILE" EXE_GATEWAY_AUTH_TOKEN)"
-  if [ -z "$auth_token" ]; then
-    auth_token="$(read_existing_secret "$LEGACY_ENV_FILE" AUTH_TOKEN)"
-  fi
-  if [ -z "$auth_token" ]; then
-    auth_token="$(openssl rand -hex 32)"
-    log "Generated new API auth token."
+  local auth_token_hash
+  local generated_auth_token=""
+
+  auth_token_hash="$(read_existing_secret "$ENV_FILE" EXE_GATEWAY_AUTH_TOKEN_HASH)"
+  if [ -z "$auth_token_hash" ]; then
+    auth_token="$(read_existing_secret "$ENV_FILE" EXE_GATEWAY_AUTH_TOKEN)"
+    if [ -z "$auth_token" ]; then
+      auth_token="$(read_existing_secret "$LEGACY_ENV_FILE" AUTH_TOKEN)"
+    fi
+    if [ -z "$auth_token" ]; then
+      auth_token="$(openssl rand -hex 32)"
+      generated_auth_token="$auth_token"
+      log "Generated new API auth token (only its SHA-256 hash will be stored)."
+    else
+      log "Migrating existing API auth token to SHA-256 hash storage."
+    fi
+    auth_token_hash="$(sha256_hex "$auth_token")"
   else
-    log "Reusing existing API auth token."
+    log "Reusing existing API auth token hash."
   fi
 
   local ws_auth_token
@@ -135,7 +184,7 @@ NODE_ENV=production
 NODE_OPTIONS=--max-old-space-size=2048
 EXE_GATEWAY_HOME=$STATE_DIR
 EXE_GATEWAY_CONFIG=$CONFIG_FILE
-EXE_GATEWAY_AUTH_TOKEN=$auth_token
+EXE_GATEWAY_AUTH_TOKEN_HASH=$auth_token_hash
 EXE_GATEWAY_WS_RELAY_ENABLED=false
 EXE_GATEWAY_WS_RELAY_HOST=127.0.0.1
 EXE_GATEWAY_WS_RELAY_PORT=3101
@@ -148,13 +197,15 @@ ENV_EOF
   ensure_env_setting "$ENV_FILE" NODE_OPTIONS --max-old-space-size=2048
   ensure_env_setting "$ENV_FILE" EXE_GATEWAY_HOME "$STATE_DIR"
   ensure_env_setting "$ENV_FILE" EXE_GATEWAY_CONFIG "$CONFIG_FILE"
-  ensure_env_setting "$ENV_FILE" EXE_GATEWAY_AUTH_TOKEN "$auth_token"
+  upsert_env_setting "$ENV_FILE" EXE_GATEWAY_AUTH_TOKEN_HASH "$auth_token_hash"
+  remove_env_setting "$ENV_FILE" EXE_GATEWAY_AUTH_TOKEN
+  remove_env_setting "$ENV_FILE" AUTH_TOKEN
   ensure_env_setting "$ENV_FILE" EXE_GATEWAY_WS_RELAY_ENABLED false
   ensure_env_setting "$ENV_FILE" EXE_GATEWAY_WS_RELAY_HOST 127.0.0.1
   ensure_env_setting "$ENV_FILE" EXE_GATEWAY_WS_RELAY_PORT 3101
   ensure_env_setting "$ENV_FILE" EXE_GATEWAY_WS_RELAY_AUTH_TOKEN "$ws_auth_token"
 
-  AUTH_TOKEN="$auth_token"
+  GENERATED_AUTH_TOKEN="$generated_auth_token"
 }
 
 ensure_config() {
@@ -199,14 +250,14 @@ lock_repo_permissions() {
 }
 
 print_summary() {
-  cat <<DONE
+  cat <<EOF
 
 ═══════════════════════════════════════════════
  exe-gateway installed successfully
 
  Config file: $CONFIG_FILE
  Env file:    $ENV_FILE
- API token:   $AUTH_TOKEN
+ API token:   SHA-256 hash stored in $ENV_FILE
 
  Next steps:
  1. Edit $CONFIG_FILE for the customer's adapters.
@@ -216,7 +267,23 @@ print_summary() {
  4. Start the service:
     systemctl start exe-gateway
  5. Verify health:
-    curl -H "Authorization: Bearer $AUTH_TOKEN" http://127.0.0.1:3100/health
+EOF
+
+  if [ -n "${GENERATED_AUTH_TOKEN:-}" ]; then
+    cat <<EOF
+    Save this admin bearer token now (only its SHA-256 hash is stored in $ENV_FILE):
+    $GENERATED_AUTH_TOKEN
+
+    curl -H "Authorization: Bearer $GENERATED_AUTH_TOKEN" http://127.0.0.1:3100/health
+EOF
+  else
+    cat <<EOF
+    Use the admin bearer token you already saved earlier:
+    curl -H "Authorization: Bearer <saved-admin-token>" http://127.0.0.1:3100/health
+EOF
+  fi
+
+  cat <<EOF
 
  Optional:
  - Configure nginx with nginx-gateway.conf
@@ -224,6 +291,7 @@ print_summary() {
 ═══════════════════════════════════════════════
 
 DONE
+EOF
 }
 
 require_root

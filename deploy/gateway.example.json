@@ -1,6 +1,7 @@
 {
   "port": 3100,
   "host": "127.0.0.1",
+  "whatsappVerifyToken": "set-via-EXE_GATEWAY_WHATSAPP_VERIFY_TOKEN",
   "readOnly": false,
   "storageFilter": {
     "enabled": false
@@ -13,6 +14,9 @@
   "adapters": {
     "whatsapp": {
       "enabled": true,
+      "credentials": {
+        "app_secret": "set-if-you-use-meta-whatsapp-webhooks"
+      },
       "accounts": [
         {
           "name": "default",
@@ -22,11 +26,23 @@
     },
     "telegram": {
       "enabled": false,
-      "accounts": []
+      "accounts": [
+        {
+          "name": "default",
+          "bot_token": "123456:ABC-DEF...",
+          "secret_token": "set-if-you-use-telegram-webhooks"
+        }
+      ]
     },
     "discord": {
       "enabled": false,
-      "accounts": []
+      "accounts": [
+        {
+          "name": "default",
+          "bot_token": "your-discord-token",
+          "public_key": "set-if-you-use-discord-interactions"
+        }
+      ]
     },
     "slack": {
       "enabled": false,

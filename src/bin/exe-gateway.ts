@@ -101,7 +101,9 @@ async function main(): Promise<void> {
     port,
     host,
     authToken: config.authToken,
+    authTokenHash: config.authTokenHash,
     whatsappVerifyToken: config.whatsappVerifyToken,
+    webhookSignatures: collectWebhookSignatures(config.adapters),
   });
 
   const wsRelay = buildWsRelay(config);
@@ -157,7 +159,7 @@ async function main(): Promise<void> {
   const gateway = new Gateway({
     config: {
       routes: [],
-      defaultRoute: "exe",
+      defaultRoute: "default",
       defaultModelTier: "sonnet",
       defaultPermissions: { canRead: true, canWrite: false, canExecute: false },
     },
@@ -188,7 +190,7 @@ async function main(): Promise<void> {
 
       const wa = new WhatsAppAdapter(account.name);
       server.onPlatform("whatsapp", (body) => wa.injectMessage(body));
-      server.registerAdapter("whatsapp", wa);
+      server.registerAdapter("whatsapp", wa, account.name);
       gateway.registerAdapter(wa);
       platformConfigs.set(`whatsapp:${account.name}` as any, {
         platform: "whatsapp",
@@ -207,6 +209,7 @@ async function main(): Promise<void> {
       const { readOnly: _ro, ...accountCreds } = account;
       const telegram = new TelegramAdapter(account.name);
       server.onPlatform("telegram", (body) => telegram.injectMessage(body));
+      server.registerAdapter("telegram", telegram, account.name);
       gateway.registerAdapter(telegram);
       platformConfigs.set(`telegram:${account.name}`, {
         platform: "telegram",
@@ -227,6 +230,7 @@ async function main(): Promise<void> {
       const { readOnly: _ro, ...accountCreds } = account;
       const discord = new DiscordAdapter(account.name);
       server.onPlatform("discord", (body) => discord.injectMessage(body));
+      server.registerAdapter("discord", discord, account.name);
       gateway.registerAdapter(discord);
       platformConfigs.set(`discord:${account.name}`, {
         platform: "discord",
@@ -247,6 +251,7 @@ async function main(): Promise<void> {
       const { readOnly: _ro, ...accountCreds } = account;
       const slack = new SlackAdapter(account.name);
       server.onPlatform("slack", (body) => slack.injectMessage(body));
+      server.registerAdapter("slack", slack, account.name);
       gateway.registerAdapter(slack);
       platformConfigs.set(`slack:${account.name}`, {
         platform: "slack",
@@ -264,6 +269,7 @@ async function main(): Promise<void> {
     const { IMessageAdapter } = await import("../adapters/imessage.js");
     const imessage = new IMessageAdapter();
     server.onPlatform("imessage", (body) => imessage.injectMessage(body));
+    server.registerAdapter("imessage", imessage, "default");
     gateway.registerAdapter(imessage);
     platformConfigs.set("imessage:default", {
       platform: "imessage",
@@ -280,6 +286,7 @@ async function main(): Promise<void> {
       const { readOnly: _ro, ...accountCreds } = account;
       const email = new EmailAdapter(account.name);
       server.onPlatform("email", (body) => email.injectMessage(body));
+      server.registerAdapter("email", email, account.name);
       gateway.registerAdapter(email);
       platformConfigs.set(`email:${account.name}`, {
         platform: "email",
@@ -297,6 +304,7 @@ async function main(): Promise<void> {
     const { WebhookAdapter } = await import("../adapters/webhook.js");
     const webhook = new WebhookAdapter();
     server.onPlatform("generic", (body) => webhook.injectMessage(body));
+    server.registerAdapter("webhook", webhook, "default");
     gateway.registerAdapter(webhook);
     platformConfigs.set("webhook:default", {
       platform: "webhook",
@@ -372,6 +380,67 @@ function buildWsRelay(
     host: config.wsRelay.host ?? DEFAULT_BIND_HOST,
     authTokenHash,
   });
+}
+
+type AdapterCredentialConfig = {
+  credentials?: Record<string, string>;
+  accounts?: Record<string, unknown>[];
+};
+
+function collectWebhookSignatures(
+  adapters?: Record<string, unknown>,
+): {
+  whatsappAppSecrets?: string[];
+  telegramSecretTokens?: string[];
+  discordPublicKeys?: string[];
+} | undefined {
+  const whatsapp = collectCredentialValues(
+    adapters?.whatsapp as AdapterCredentialConfig | undefined,
+    ["app_secret", "appSecret"],
+  );
+  const telegram = collectCredentialValues(
+    adapters?.telegram as AdapterCredentialConfig | undefined,
+    ["secret_token", "secretToken", "webhook_secret_token", "webhookSecretToken"],
+  );
+  const discord = collectCredentialValues(
+    adapters?.discord as AdapterCredentialConfig | undefined,
+    ["public_key", "publicKey", "discord_public_key", "discordPublicKey"],
+  );
+
+  if (whatsapp.length === 0 && telegram.length === 0 && discord.length === 0) {
+    return undefined;
+  }
+
+  return {
+    ...(whatsapp.length > 0 ? { whatsappAppSecrets: whatsapp } : {}),
+    ...(telegram.length > 0 ? { telegramSecretTokens: telegram } : {}),
+    ...(discord.length > 0 ? { discordPublicKeys: discord } : {}),
+  };
+}
+
+function collectCredentialValues(
+  adapter: AdapterCredentialConfig | undefined,
+  keys: string[],
+): string[] {
+  const values = new Set<string>();
+  const candidates: Record<string, unknown>[] = [];
+  if (adapter?.credentials) {
+    candidates.push(adapter.credentials);
+  }
+  for (const account of adapter?.accounts ?? []) {
+    candidates.push(account);
+  }
+
+  for (const candidate of candidates) {
+    for (const key of keys) {
+      const raw = candidate[key];
+      if (typeof raw === "string" && raw.trim()) {
+        values.add(raw.trim());
+      }
+    }
+  }
+
+  return [...values];
 }
 
 function toCredentialRecord(

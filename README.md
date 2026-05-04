@@ -57,7 +57,7 @@ systemctl start exe-gateway
 curl -H "Authorization: Bearer <your-token>" http://127.0.0.1:3100/health
 ```
 
-The auth token is printed during installation and stored in `/etc/exe-gateway/exe-gateway.env`.
+The raw auth token is shown once during installation; only its SHA-256 hash is stored in `/etc/exe-gateway/exe-gateway.env`.
 
 ### Manual install (any platform)
 
@@ -153,9 +153,13 @@ Runtime config lives at `~/.exe-os/gateway.json` by default, or the path set in 
 ```json
 {
   "port": 3100,
+  "whatsappVerifyToken": "set-via-EXE_GATEWAY_WHATSAPP_VERIFY_TOKEN",
   "adapters": {
     "whatsapp": {
       "enabled": true,
+      "credentials": {
+        "app_secret": "set-if-you-use-meta-whatsapp-webhooks"
+      },
       "accounts": [
         {
           "name": "sales",
@@ -172,7 +176,8 @@ Runtime config lives at `~/.exe-os/gateway.json` by default, or the path set in 
       "accounts": [
         {
           "name": "main-bot",
-          "bot_token": "123456:ABC-DEF..."
+          "bot_token": "123456:ABC-DEF...",
+          "secret_token": "set-if-you-use-telegram-webhooks"
         }
       ]
     },
@@ -181,7 +186,8 @@ Runtime config lives at `~/.exe-os/gateway.json` by default, or the path set in 
       "accounts": [
         {
           "name": "community-bot",
-          "bot_token": "your-discord-token"
+          "bot_token": "your-discord-token",
+          "public_key": "set-if-you-use-discord-interactions"
         }
       ]
     },
@@ -212,6 +218,14 @@ Runtime config lives at `~/.exe-os/gateway.json` by default, or the path set in 
 }
 ```
 
+Admin API bearer tokens are hashed at rest. Save the raw token once during install; the installer persists only `EXE_GATEWAY_AUTH_TOKEN_HASH` in `/etc/exe-gateway/exe-gateway.env`.
+
+If you expose inbound provider webhooks, configure the matching signature secret in `gateway.json`:
+
+- **WhatsApp (Meta Cloud API):** `adapters.whatsapp.credentials.app_secret` → validates `X-Hub-Signature-256`
+- **Telegram:** `accounts[].secret_token` (or adapter-level `secret_token`) → validates `X-Telegram-Bot-Api-Secret-Token`
+- **Discord interactions/webhooks:** `accounts[].public_key` (or adapter-level `public_key`) → validates the Ed25519 signature headers
+
 Pair each WhatsApp account separately:
 
 ```bash
@@ -221,7 +235,8 @@ sudo -u exe node /opt/exe-gateway/pair-whatsapp.mjs support +0987654321
 
 ## API Reference
 
-All endpoints require the `Authorization: Bearer <token>` header (except `/health`).
+`/api/*` and `/v1/usage/*` require the `Authorization: Bearer <token>` header (except `/health`).
+Provider webhook routes use provider-specific signature validation instead of the admin bearer token.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|

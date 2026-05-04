@@ -19,6 +19,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import crypto from "node:crypto";
 
 const DEFAULT_HOST = "127.0.0.1";
 const BODY_SIZE_LIMIT = 1_048_576; // 1 MB
@@ -27,18 +28,27 @@ export interface WebhookServerConfig {
   port: number;
   host?: string;
   authToken?: string;
+  authTokenHash?: string;
   whatsappVerifyToken?: string;
+  webhookSignatures?: WebhookSignatureConfig;
 }
 
 type PlatformHandler = (body: unknown) => Promise<void>;
 
-import { OutboundLimiter, PLATFORM_LIMITS } from "./outbound-limiter.js";
+export interface WebhookSignatureConfig {
+  whatsappAppSecrets?: string[];
+  telegramSecretTokens?: string[];
+  discordPublicKeys?: string[];
+}
+
+import { OutboundLimiter } from "./outbound-limiter.js";
 import { handleProxyRequest, type LLMProxyConfig } from "./llm-proxy.js";
 import { getUsageSummary } from "./metering.js";
 
 /** Minimal adapter interface for outbound send */
 interface OutboundAdapter {
   platform: string;
+  accountName?: string;
   sendText(channelId: string, text: string, options?: Record<string, unknown>): Promise<void>;
   sendTyping?(channelId: string): Promise<void>;
   /** Baileys socket for raw API access (WhatsApp only) */
@@ -54,6 +64,8 @@ export class WebhookServer {
   private _readOnly = false;
   private _dbAvailable = false;
   private proxyConfig: LLMProxyConfig | null = null;
+  private readonly authTokenHash: string | null;
+  private readonly webhookSignatures: Required<WebhookSignatureConfig>;
 
   /** Enable read-only mode — rejects all outbound sends via /api/send */
   setReadOnly(enabled: boolean): void {
@@ -74,11 +86,14 @@ export class WebhookServer {
   }
 
   constructor(private config: WebhookServerConfig) {
+    this.authTokenHash = normalizeSha256Hex(config.authTokenHash) ??
+      (config.authToken ? sha256Hex(config.authToken) : null);
+    this.webhookSignatures = normalizeWebhookSignatures(config.webhookSignatures);
     const host = config.host ?? DEFAULT_HOST;
-    if ((process.env.NODE_ENV === "production" || isPublicBindHost(host)) && !config.authToken) {
+    if ((process.env.NODE_ENV === "production" || isPublicBindHost(host)) && !this.authTokenHash) {
       throw new Error(
         "[webhook-server] authToken is required in production. " +
-          "Set EXE_GATEWAY_AUTH_TOKEN, authToken in the config file, or pass it in WebhookServerConfig.",
+          "Set EXE_GATEWAY_AUTH_TOKEN_HASH/EXE_GATEWAY_AUTH_TOKEN, authTokenHash/authToken in the config file, or pass it in WebhookServerConfig.",
       );
     }
   }
@@ -89,9 +104,18 @@ export class WebhookServer {
   }
 
   /** Register an adapter for outbound messaging: POST /api/send */
-  registerAdapter(platform: string, adapter: OutboundAdapter): void {
-    this.adapters.set(platform, adapter);
-    this.limiters.set(platform, new OutboundLimiter(platform));
+  registerAdapter(
+    platform: string,
+    adapter: OutboundAdapter,
+    accountName = adapter.accountName ?? "default",
+  ): void {
+    const normalizedPlatform = platform.trim().toLowerCase();
+    const key = adapterKey(normalizedPlatform, normalizeAccountName(accountName) ?? "default");
+    this.adapters.set(key, adapter);
+    this.limiters.set(
+      key,
+      new OutboundLimiter(normalizedPlatform, getOutboundLimiterTestOverrides()),
+    );
   }
 
   /** Start listening */
@@ -152,7 +176,7 @@ export class WebhookServer {
 
     // GET /v1/usage/:customerId — usage summary (admin auth required)
     if (method === "GET" && url.startsWith("/v1/usage/")) {
-      if (this.config.authToken && !this.verifyAuth(req)) {
+      if (this.authTokenHash && !this.verifyAuth(req)) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
       }
@@ -184,7 +208,7 @@ export class WebhookServer {
 
     // POST /api/send — send message via adapter
     if (method === "POST" && url === "/api/send") {
-      if (this.config.authToken && !this.verifyAuth(req)) {
+      if (this.authTokenHash && !this.verifyAuth(req)) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
       }
@@ -194,7 +218,7 @@ export class WebhookServer {
 
     // GET /api/limits — show rate limits and stats
     if (method === "GET" && url === "/api/limits") {
-      if (this.config.authToken && !this.verifyAuth(req)) {
+      if (this.authTokenHash && !this.verifyAuth(req)) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
       }
@@ -203,29 +227,29 @@ export class WebhookServer {
     }
 
     // GET /api/groups — list WhatsApp groups
-    if (method === "GET" && url === "/api/groups") {
-      if (this.config.authToken && !this.verifyAuth(req)) {
+    if (method === "GET" && url.startsWith("/api/groups")) {
+      if (this.authTokenHash && !this.verifyAuth(req)) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
       }
-      await this.handleApiGroups(res);
+      await this.handleApiGroups(req, res);
       return;
     }
 
     // GET /api/group/:id — group info
     if (method === "GET" && url.startsWith("/api/group/")) {
-      if (this.config.authToken && !this.verifyAuth(req)) {
+      if (this.authTokenHash && !this.verifyAuth(req)) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
       }
       const groupId = url.replace("/api/group/", "").split("?")[0];
-      await this.handleApiGroupInfo(res, groupId);
+      await this.handleApiGroupInfo(req, res, groupId);
       return;
     }
 
     // GET /api/threads — list threads with contact info
     if (method === "GET" && url.startsWith("/api/threads") && !url.startsWith("/api/threads/")) {
-      if (this.config.authToken && !this.verifyAuth(req)) {
+      if (this.authTokenHash && !this.verifyAuth(req)) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
       }
@@ -235,7 +259,7 @@ export class WebhookServer {
 
     // GET /api/threads/:id/messages — paginated messages
     if (method === "GET" && /^\/api\/threads\/\d+\/messages/.test(url)) {
-      if (this.config.authToken && !this.verifyAuth(req)) {
+      if (this.authTokenHash && !this.verifyAuth(req)) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
       }
@@ -246,7 +270,7 @@ export class WebhookServer {
 
     // GET /api/contacts — list contacts
     if (method === "GET" && url.startsWith("/api/contacts") && !url.startsWith("/api/contacts/")) {
-      if (this.config.authToken && !this.verifyAuth(req)) {
+      if (this.authTokenHash && !this.verifyAuth(req)) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
       }
@@ -256,7 +280,7 @@ export class WebhookServer {
 
     // GET /api/contacts/:id — contact detail
     if (method === "GET" && /^\/api\/contacts\/\d+/.test(url)) {
-      if (this.config.authToken && !this.verifyAuth(req)) {
+      if (this.authTokenHash && !this.verifyAuth(req)) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
       }
@@ -308,22 +332,6 @@ export class WebhookServer {
     res: ServerResponse,
     url: string,
   ): Promise<void> {
-    // Always consume body first to prevent connection resets
-    let body: unknown;
-    let parseError: Error | null = null;
-    try {
-      body = await readBody(req);
-    } catch (err) {
-      parseError = err instanceof Error ? err : new Error(String(err));
-    }
-
-    // Auth check (after body is drained)
-    if (this.config.authToken && !this.verifyAuth(req)) {
-      sendJson(res, 401, { error: "Unauthorized" });
-      return;
-    }
-
-    // Extract platform from path: /webhook/:platform
     const platform = extractPlatform(url);
     if (!platform) {
       sendJson(res, 200, { error: "No platform specified" });
@@ -337,8 +345,34 @@ export class WebhookServer {
       return;
     }
 
-    // Handle parse errors
-    if (parseError) {
+    let rawBody: Buffer = Buffer.alloc(0);
+    let readError: Error | null = null;
+    try {
+      rawBody = await readRawBody(req);
+    } catch (err) {
+      readError = err instanceof Error ? err : new Error(String(err));
+    }
+
+    if (readError) {
+      console.error(
+        `[webhook-server] Malformed payload on /webhook/${platform}:`,
+        readError.message,
+      );
+      sendJson(res, 200, { received: true, error: "Malformed payload" });
+      return;
+    }
+
+    const verification = this.verifyWebhookRequest(platform, req, rawBody);
+    if (!verification.ok) {
+      sendJson(res, verification.status, { error: verification.error });
+      return;
+    }
+
+    let body: unknown;
+    try {
+      body = parseJsonBody(rawBody);
+    } catch (err) {
+      const parseError = err instanceof Error ? err : new Error(String(err));
       console.error(
         `[webhook-server] Malformed payload on /webhook/${platform}:`,
         parseError.message,
@@ -361,8 +395,35 @@ export class WebhookServer {
   }
 
   private verifyAuth(req: IncomingMessage): boolean {
-    const authHeader = req.headers.authorization ?? "";
-    return authHeader === `Bearer ${this.config.authToken}`;
+    if (!this.authTokenHash) return false;
+    const token = extractBearerToken(req.headers.authorization);
+    if (!token) return false;
+    const actualBuffer = Buffer.from(sha256Hex(token), "hex");
+    const expectedBuffer = Buffer.from(this.authTokenHash, "hex");
+    return (
+      actualBuffer.length === expectedBuffer.length &&
+      crypto.timingSafeEqual(actualBuffer, expectedBuffer)
+    );
+  }
+
+  private verifyWebhookRequest(
+    platform: string,
+    req: IncomingMessage,
+    rawBody: Buffer,
+  ): WebhookVerificationResult {
+    switch (platform) {
+      case "whatsapp":
+        return verifyWhatsAppWebhook(req, rawBody, this.webhookSignatures.whatsappAppSecrets);
+      case "telegram":
+        return verifyTelegramWebhook(req, this.webhookSignatures.telegramSecretTokens);
+      case "discord":
+        return verifyDiscordWebhook(req, rawBody, this.webhookSignatures.discordPublicKeys);
+      default:
+        if (this.authTokenHash && !this.verifyAuth(req)) {
+          return { ok: false, status: 401, error: "Unauthorized" };
+        }
+        return { ok: true };
+    }
   }
 
   // ---- LLM Proxy admin handlers ----
@@ -404,33 +465,42 @@ export class WebhookServer {
         return;
       }
 
-      const body = (await readBody(req)) as Record<string, unknown>;
-      const platform = (body.platform as string) ?? "whatsapp";
+      const body = (await readJsonBody(req)) as Record<string, unknown>;
+      const platform =
+        typeof body.platform === "string"
+          ? body.platform.trim().toLowerCase()
+          : "whatsapp";
+      const account = normalizeAccountName(
+        typeof body.account === "string"
+          ? body.account
+          : typeof body.accountName === "string"
+            ? body.accountName
+            : undefined,
+      );
       const to = body.to as string;
       const text = body.text as string;
-      const skipLimiter = body.urgent === true; // Emergency bypass (use sparingly)
 
       if (!to || !text) {
         sendJson(res, 400, { error: "Missing 'to' and/or 'text' fields" });
         return;
       }
 
-      const adapter = this.adapters.get(platform);
-      if (!adapter) {
-        sendJson(res, 400, { error: `No adapter for platform: ${platform}. Available: ${[...this.adapters.keys()].join(", ")}` });
+      const resolved = this.resolveOutbound(platform, account);
+      if (!resolved.adapter) {
+        sendJson(res, 400, { error: resolved.error ?? `No adapter for platform: ${platform}.` });
         return;
       }
+      const { adapter, accountName } = resolved;
 
-      const limiter = this.limiters.get(platform);
+      const limiter = this.limiters.get(adapterKey(platform, accountName));
 
       // Normalize to WhatsApp JID — preserve group (@g.us) and broadcast (@broadcast) suffixes
       const channelId = platform === "whatsapp"
         ? (to.includes("@") ? to : to.replace(/[^0-9]/g, "") + "@s.whatsapp.net")
         : to;
 
-      if (limiter && !skipLimiter) {
+      if (limiter) {
         // Rate-limited send with typing simulation
-        const stats = limiter.getStats();
         await limiter.send(
           channelId,
           text,
@@ -441,6 +511,7 @@ export class WebhookServer {
         sendJson(res, 200, {
           sent: true,
           platform,
+          account: accountName,
           to: channelId,
           rateLimited: true,
           stats: newStats,
@@ -448,7 +519,13 @@ export class WebhookServer {
       } else {
         // Direct send (no rate limiting)
         await adapter.sendText(channelId, text);
-        sendJson(res, 200, { sent: true, platform, to: channelId, rateLimited: false });
+        sendJson(res, 200, {
+          sent: true,
+          platform,
+          account: accountName,
+          to: channelId,
+          rateLimited: false,
+        });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -460,8 +537,8 @@ export class WebhookServer {
   /** GET /api/limits — show current rate limits and stats for all platforms */
   private handleApiLimits(res: ServerResponse): void {
     const result: Record<string, unknown> = {};
-    for (const [platform, limiter] of this.limiters) {
-      result[platform] = {
+    for (const [key, limiter] of this.limiters) {
+      result[key] = {
         limits: limiter.getLimits(),
         stats: limiter.getStats(),
       };
@@ -469,15 +546,19 @@ export class WebhookServer {
     sendJson(res, 200, result);
   }
 
-  private async handleApiGroups(res: ServerResponse): Promise<void> {
+  private async handleApiGroups(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
-      const adapter = this.adapters.get("whatsapp");
-      if (!adapter?.getRawSocket) {
-        sendJson(res, 400, { error: "WhatsApp adapter not available or no raw socket access" });
+      const params = parseQuery(req.url ?? "");
+      const account = normalizeAccountName(params.account ?? params.accountName);
+      const resolved = this.resolveOutbound("whatsapp", account);
+      if (!resolved.adapter?.getRawSocket) {
+        sendJson(res, 400, {
+          error: resolved.error ?? "WhatsApp adapter not available or no raw socket access",
+        });
         return;
       }
 
-      const sock = adapter.getRawSocket() as Record<string, Function>;
+      const sock = resolved.adapter.getRawSocket() as Record<string, Function>;
       if (!sock?.groupFetchAllParticipating) {
         sendJson(res, 500, { error: "Baileys socket missing groupFetchAllParticipating" });
         return;
@@ -492,7 +573,10 @@ export class WebhookServer {
         creation: g.creation,
       }));
 
-      sendJson(res, 200, { groups: result as unknown as Record<string, unknown>[] });
+      sendJson(res, 200, {
+        account: resolved.accountName,
+        groups: result as unknown as Record<string, unknown>[],
+      });
     } catch (err) {
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
     }
@@ -581,20 +665,27 @@ export class WebhookServer {
     }
   }
 
-  private async handleApiGroupInfo(res: ServerResponse, groupId: string): Promise<void> {
+  private async handleApiGroupInfo(
+    req: IncomingMessage,
+    res: ServerResponse,
+    groupId: string,
+  ): Promise<void> {
     try {
-      const adapter = this.adapters.get("whatsapp");
-      if (!adapter?.getRawSocket) {
-        sendJson(res, 400, { error: "WhatsApp adapter not available" });
+      const params = parseQuery(req.url ?? "");
+      const account = normalizeAccountName(params.account ?? params.accountName);
+      const resolved = this.resolveOutbound("whatsapp", account);
+      if (!resolved.adapter?.getRawSocket) {
+        sendJson(res, 400, { error: resolved.error ?? "WhatsApp adapter not available" });
         return;
       }
 
-      const sock = adapter.getRawSocket() as Record<string, Function>;
+      const sock = resolved.adapter.getRawSocket() as Record<string, Function>;
       // Ensure group JID format
       const jid = groupId.includes("@") ? groupId : groupId + "@g.us";
 
       const metadata = await sock.groupMetadata(jid);
       sendJson(res, 200, {
+        account: resolved.accountName,
         id: (metadata as any).id,
         subject: (metadata as any).subject,
         owner: (metadata as any).owner,
@@ -607,6 +698,60 @@ export class WebhookServer {
     } catch (err) {
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
     }
+  }
+
+  private resolveOutbound(
+    platform: string,
+    requestedAccount?: string,
+  ): {
+    adapter?: OutboundAdapter;
+    accountName: string;
+    error?: string;
+  } {
+    const normalizedPlatform = platform.trim().toLowerCase();
+    const platformKeys = [...this.adapters.keys()].filter((key) =>
+      key.startsWith(`${normalizedPlatform}:`),
+    );
+    if (platformKeys.length === 0) {
+      return {
+        accountName: requestedAccount ?? "default",
+        error: `No adapter for platform: ${normalizedPlatform}.`,
+      };
+    }
+
+    if (requestedAccount) {
+      const exactKey = adapterKey(normalizedPlatform, requestedAccount);
+      const adapter = this.adapters.get(exactKey);
+      if (!adapter) {
+        const available = platformKeys.map((key) => key.split(":")[1]).join(", ");
+        return {
+          accountName: requestedAccount,
+          error: `Unknown ${normalizedPlatform} account "${requestedAccount}". Available: ${available}`,
+        };
+      }
+      return { adapter, accountName: requestedAccount };
+    }
+
+    const defaultAdapter = this.adapters.get(adapterKey(normalizedPlatform, "default"));
+    if (defaultAdapter) {
+      return { adapter: defaultAdapter, accountName: "default" };
+    }
+
+    if (platformKeys.length === 1) {
+      const key = platformKeys[0]!;
+      return {
+        adapter: this.adapters.get(key),
+        accountName: key.split(":")[1] ?? "default",
+      };
+    }
+
+    const available = platformKeys.map((key) => key.split(":")[1]).join(", ");
+    return {
+      accountName: "default",
+      error:
+        `Multiple ${normalizedPlatform} accounts are configured. ` +
+        `Include "account" in the request body or query string. Available: ${available}`,
+    };
   }
 }
 
@@ -630,6 +775,28 @@ function clampLimit(raw?: string): number {
   return Math.min(n, 200);
 }
 
+function normalizeAccountName(raw?: string): string | undefined {
+  const trimmed = raw?.trim();
+  return trimmed ? trimmed.toLowerCase() : undefined;
+}
+
+function adapterKey(platform: string, accountName: string): string {
+  return `${platform}:${accountName}`;
+}
+
+function getOutboundLimiterTestOverrides() {
+  if (process.env.NODE_ENV !== "test") return undefined;
+  return {
+    minDelayPerRecipientSec: 0,
+    maxDelayPerRecipientSec: 0,
+    minGlobalDelaySec: 0,
+    maxGlobalDelaySec: 0,
+    typingCps: 1_000_000,
+    minTypingSec: 0,
+    maxTypingSec: 0,
+  };
+}
+
 function isPublicBindHost(host: string): boolean {
   const normalized = host.trim().toLowerCase();
   return !["127.0.0.1", "localhost", "::1"].includes(normalized);
@@ -638,11 +805,10 @@ function isPublicBindHost(host: string): boolean {
 /** Extract platform name from URL path /webhook/:platform */
 function extractPlatform(url: string): string | null {
   const match = url.match(/^\/webhook\/([a-zA-Z0-9_-]+)/);
-  return match?.[1] ?? null;
+  return match?.[1]?.toLowerCase() ?? null;
 }
 
-/** Read and parse JSON body from an incoming request */
-function readBody(req: IncomingMessage): Promise<unknown> {
+function readRawBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -664,16 +830,7 @@ function readBody(req: IncomingMessage): Promise<unknown> {
     req.on("end", () => {
       if (done) return;
       done = true;
-      const raw = Buffer.concat(chunks).toString("utf-8");
-      if (!raw) {
-        resolve({});
-        return;
-      }
-      try {
-        resolve(JSON.parse(raw));
-      } catch {
-        reject(new Error("Invalid JSON"));
-      }
+      resolve(Buffer.concat(chunks));
     });
 
     req.on("error", (err) => {
@@ -683,6 +840,178 @@ function readBody(req: IncomingMessage): Promise<unknown> {
       }
     });
   });
+}
+
+function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  return readRawBody(req).then((rawBody) => parseJsonBody(rawBody));
+}
+
+function parseJsonBody(rawBody: Buffer): unknown {
+  if (rawBody.length === 0) {
+    return {};
+  }
+  try {
+    return JSON.parse(rawBody.toString("utf-8"));
+  } catch {
+    throw new Error("Invalid JSON");
+  }
+}
+
+type WebhookVerificationResult =
+  | { ok: true }
+  | { ok: false; status: number; error: string };
+
+function verifyWhatsAppWebhook(
+  req: IncomingMessage,
+  rawBody: Buffer,
+  appSecrets: string[],
+): WebhookVerificationResult {
+  if (appSecrets.length === 0) {
+    return { ok: false, status: 503, error: "WhatsApp webhook app secret not configured" };
+  }
+
+  const signatureHeader = firstHeaderValue(req.headers["x-hub-signature-256"]);
+  if (!signatureHeader?.startsWith("sha256=")) {
+    return { ok: false, status: 401, error: "Missing WhatsApp webhook signature" };
+  }
+
+  const providedHex = signatureHeader.slice("sha256=".length);
+  if (!/^[0-9a-fA-F]{64}$/.test(providedHex)) {
+    return { ok: false, status: 401, error: "Invalid WhatsApp webhook signature" };
+  }
+
+  const provided = Buffer.from(providedHex, "hex");
+  for (const secret of appSecrets) {
+    const expected = crypto.createHmac("sha256", secret).update(rawBody).digest();
+    if (provided.length === expected.length && crypto.timingSafeEqual(provided, expected)) {
+      return { ok: true };
+    }
+  }
+
+  return { ok: false, status: 401, error: "Invalid WhatsApp webhook signature" };
+}
+
+function verifyTelegramWebhook(
+  req: IncomingMessage,
+  secretTokens: string[],
+): WebhookVerificationResult {
+  if (secretTokens.length === 0) {
+    return { ok: false, status: 503, error: "Telegram webhook secret_token not configured" };
+  }
+
+  const provided =
+    firstHeaderValue(req.headers["x-telegram-bot-api-secret-token"]) ??
+    parseQuery(req.url ?? "").secret_token;
+  if (!provided) {
+    return { ok: false, status: 401, error: "Missing Telegram webhook secret token" };
+  }
+
+  const providedBuffer = Buffer.from(provided);
+  for (const secret of secretTokens) {
+    const expectedBuffer = Buffer.from(secret);
+    if (
+      providedBuffer.length === expectedBuffer.length &&
+      crypto.timingSafeEqual(providedBuffer, expectedBuffer)
+    ) {
+      return { ok: true };
+    }
+  }
+
+  return { ok: false, status: 401, error: "Invalid Telegram webhook secret token" };
+}
+
+function verifyDiscordWebhook(
+  req: IncomingMessage,
+  rawBody: Buffer,
+  publicKeys: string[],
+): WebhookVerificationResult {
+  if (publicKeys.length === 0) {
+    return { ok: false, status: 503, error: "Discord webhook public key not configured" };
+  }
+
+  const signatureHex = firstHeaderValue(req.headers["x-signature-ed25519"]);
+  const timestamp = firstHeaderValue(req.headers["x-signature-timestamp"]);
+  if (!signatureHex || !timestamp) {
+    return { ok: false, status: 401, error: "Missing Discord webhook signature" };
+  }
+  if (!/^[0-9a-fA-F]+$/.test(signatureHex) || signatureHex.length % 2 !== 0) {
+    return { ok: false, status: 401, error: "Invalid Discord webhook signature" };
+  }
+
+  const signature = Buffer.from(signatureHex, "hex");
+  const payload = Buffer.concat([Buffer.from(timestamp, "utf-8"), rawBody]);
+  for (const publicKey of publicKeys) {
+    try {
+      const keyObject = createDiscordPublicKey(publicKey);
+      if (crypto.verify(null, payload, keyObject, signature)) {
+        return { ok: true };
+      }
+    } catch {
+      // Ignore malformed keys so a valid fallback key can still verify the request.
+    }
+  }
+
+  return { ok: false, status: 401, error: "Invalid Discord webhook signature" };
+}
+
+function createDiscordPublicKey(publicKey: string): crypto.KeyObject {
+  if (publicKey.includes("BEGIN PUBLIC KEY")) {
+    return crypto.createPublicKey(publicKey);
+  }
+
+  const rawKey = Buffer.from(publicKey.trim(), "hex");
+  if (rawKey.length !== 32) {
+    throw new Error("Discord public key must be a 32-byte Ed25519 key");
+  }
+  const spkiPrefix = Buffer.from("302a300506032b6570032100", "hex");
+  return crypto.createPublicKey({
+    key: Buffer.concat([spkiPrefix, rawKey]),
+    format: "der",
+    type: "spki",
+  });
+}
+
+function normalizeWebhookSignatures(
+  config?: WebhookSignatureConfig,
+): Required<WebhookSignatureConfig> {
+  return {
+    whatsappAppSecrets: normalizeStringArray(config?.whatsappAppSecrets),
+    telegramSecretTokens: normalizeStringArray(config?.telegramSecretTokens),
+    discordPublicKeys: normalizeStringArray(config?.discordPublicKeys),
+  };
+}
+
+function normalizeStringArray(values?: string[]): string[] {
+  if (!values) return [];
+  const unique = new Set<string>();
+  for (const value of values) {
+    const normalized = value?.trim();
+    if (normalized) {
+      unique.add(normalized);
+    }
+  }
+  return [...unique];
+}
+
+function normalizeSha256Hex(value?: string | null): string | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(normalized) ? normalized : null;
+}
+
+function sha256Hex(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function extractBearerToken(authorization?: string): string | null {
+  if (!authorization) return null;
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1] ?? null;
+}
+
+function firstHeaderValue(value?: string | string[]): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
 }
 
 /** Send a JSON response. Webhook servers don't need keep-alive. */

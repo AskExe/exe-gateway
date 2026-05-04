@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { DBConfig } from "./db.js";
@@ -56,6 +57,7 @@ export interface GatewayJsonConfig {
   port?: number;
   host?: string;
   authToken?: string;
+  authTokenHash?: string;
   whatsappVerifyToken?: string;
   readOnly?: boolean;
   database?: DBConfig;
@@ -133,15 +135,19 @@ export function validateStartupConfig(config: GatewayJsonConfig): StartupConfigV
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  if (!config.authToken && !parseBooleanEnv("EXE_GATEWAY_ALLOW_INSECURE_NO_AUTH")) {
+  if (!config.authTokenHash && !config.authToken && !parseBooleanEnv("EXE_GATEWAY_ALLOW_INSECURE_NO_AUTH")) {
     errors.push(
       "Missing auth token. Set EXE_GATEWAY_AUTH_TOKEN in the environment " +
-        "or authToken in the config file.",
+        "or authToken/authTokenHash in the config file.",
     );
   }
 
   if (config.authToken && isPlaceholderValue(config.authToken)) {
     errors.push("authToken still contains a placeholder value.");
+  }
+
+  if (config.authTokenHash && !isSha256Hex(config.authTokenHash)) {
+    errors.push("authTokenHash must be a 64-character SHA-256 hex string.");
   }
 
   if (config.whatsappVerifyToken && isPlaceholderValue(config.whatsappVerifyToken)) {
@@ -190,12 +196,18 @@ export function isHexToken(value: string): boolean {
 function mergeConfigWithEnv(config: GatewayJsonConfig): GatewayJsonConfig {
   const database = mergeDatabaseConfig(config.database);
   const wsRelay = mergeWsRelayConfig(config.wsRelay);
+  const authToken = getFirstEnv(["EXE_GATEWAY_AUTH_TOKEN", "AUTH_TOKEN"]) ?? config.authToken;
+  const authTokenHash =
+    getFirstEnv(["EXE_GATEWAY_AUTH_TOKEN_HASH"]) ??
+    config.authTokenHash ??
+    (authToken ? hashAuthToken(authToken) : undefined);
 
   return {
     ...config,
     port: parseIntegerEnv(["EXE_GATEWAY_PORT", "PORT"]) ?? config.port,
     host: getFirstEnv(["EXE_GATEWAY_HOST"]) ?? config.host,
-    authToken: getFirstEnv(["EXE_GATEWAY_AUTH_TOKEN", "AUTH_TOKEN"]) ?? config.authToken,
+    authToken,
+    authTokenHash,
     whatsappVerifyToken:
       getFirstEnv(["EXE_GATEWAY_WHATSAPP_VERIFY_TOKEN"]) ?? config.whatsappVerifyToken,
     readOnly: parseBooleanEnv("EXE_GATEWAY_READ_ONLY") ?? config.readOnly,
@@ -299,6 +311,14 @@ function isPlaceholderValue(value: string): boolean {
     normalized.includes("your-") ||
     normalized.includes("example.com")
   );
+}
+
+export function hashAuthToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function isSha256Hex(value: string): boolean {
+  return /^[0-9a-fA-F]{64}$/.test(value.trim());
 }
 
 function isPublicBindHost(host: string): boolean {

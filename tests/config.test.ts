@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   DEFAULT_BIND_HOST,
   getDefaultWhatsAppAuthDir,
+  hashAuthToken,
   loadGatewayConfig,
   validateStartupConfig,
 } from "../src/config.js";
@@ -41,8 +42,24 @@ describe("config", () => {
 
     expect(loaded.configPath).toBe(configPath);
     expect(loaded.config.port).toBe(3200);
-    expect(loaded.config.authToken).toBe("env-token");
+    expect(loaded.config.authTokenHash).toBe(hashAuthToken("env-token"));
     expect(loaded.config.host).toBe("127.0.0.1");
+  });
+
+  it("prefers EXE_GATEWAY_AUTH_TOKEN_HASH when provided", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "exe-gateway-config-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "gateway.json");
+    writeFileSync(configPath, JSON.stringify({ host: "127.0.0.1" }));
+
+    const authTokenHash = hashAuthToken("persisted-token");
+    vi.stubEnv("EXE_GATEWAY_CONFIG", configPath);
+    vi.stubEnv("EXE_GATEWAY_AUTH_TOKEN_HASH", authTokenHash);
+
+    const loaded = loadGatewayConfig();
+
+    expect(loaded.config.authTokenHash).toBe(authTokenHash);
+    expect(loaded.config.authToken).toBeUndefined();
   });
 
   it("parses DATABASE_URL into database config", () => {
@@ -86,6 +103,19 @@ describe("config", () => {
         expect.stringContaining("Missing auth token"),
         expect.stringContaining("database.password"),
         expect.stringContaining("wsRelay.authToken"),
+      ]),
+    );
+  });
+
+  it("validates malformed auth token hashes", () => {
+    const validation = validateStartupConfig({
+      host: DEFAULT_BIND_HOST,
+      authTokenHash: "not-a-sha256-hash",
+    });
+
+    expect(validation.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("authTokenHash"),
       ]),
     );
   });

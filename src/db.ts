@@ -72,32 +72,57 @@ async function resolvePrismaClient(): Promise<PrismaClient> {
   if (!prismaPromise) {
     prismaPromise = (async () => {
       const explicitPath = process.env.EXE_DB_PRISMA_CLIENT_PATH ?? process.env.EXE_OS_PRISMA_CLIENT_PATH;
-      let module: any;
+      const url = process.env.DATABASE_URL ?? databaseUrl;
+      const candidates: Array<{ label: string; load: () => Promise<any> }> = [];
 
       if (explicitPath) {
-        module = await import(pathToFileURL(explicitPath).href);
+        candidates.push({
+          label: `explicit path ${explicitPath}`,
+          load: () => import(pathToFileURL(explicitPath).href),
+        });
       } else {
+        candidates.push({
+          label: "bundled exe-gateway Prisma client",
+          load: async () => {
+            const requireFromHere = createRequire(import.meta.url);
+            const prismaEntry = requireFromHere.resolve("@prisma/client");
+            return import(pathToFileURL(prismaEntry).href);
+          },
+        });
+
         const exeDbRoot = process.env.EXE_DB_ROOT ?? path.join(os.homedir(), "exe-db");
+        candidates.push({
+          label: `exe-db Prisma client at ${exeDbRoot}`,
+          load: async () => {
+            const requireFromExeDb = createRequire(path.join(exeDbRoot, "package.json"));
+            const prismaEntry = requireFromExeDb.resolve("@prisma/client");
+            return import(pathToFileURL(prismaEntry).href);
+          },
+        });
+      }
+
+      const errors: string[] = [];
+      for (const candidate of candidates) {
         try {
-          const requireFromExeDb = createRequire(path.join(exeDbRoot, "package.json"));
-          const prismaEntry = requireFromExeDb.resolve("@prisma/client");
-          module = await import(pathToFileURL(prismaEntry).href);
-        } catch {
-          const requireFromHere = createRequire(import.meta.url);
-          const prismaEntry = requireFromHere.resolve("@prisma/client");
-          module = await import(pathToFileURL(prismaEntry).href);
+          const module = await candidate.load();
+          const PrismaClientClass = module.PrismaClient ?? module.default?.PrismaClient;
+          if (!PrismaClientClass) {
+            throw new Error("PrismaClient export not found");
+          }
+          return url
+            ? new PrismaClientClass({ datasources: { db: { url } } })
+            : new PrismaClientClass();
+        } catch (err) {
+          errors.push(`${candidate.label}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
 
-      const PrismaClientClass = module.PrismaClient ?? module.default?.PrismaClient;
-      if (!PrismaClientClass) {
-        throw new Error("Unable to load PrismaClient for exe-gateway.");
-      }
-
-      const url = process.env.DATABASE_URL ?? databaseUrl;
-      return url
-        ? new PrismaClientClass({ datasources: { db: { url } } })
-        : new PrismaClientClass();
+      throw new Error(
+        "[db] Generated Prisma client not found. " +
+          "Run npm install/build in exe-gateway so the bundled Prisma client is generated, " +
+          "set EXE_DB_PRISMA_CLIENT_PATH to a generated client, or install the exe-db repo on this host. " +
+          `Attempts: ${errors.join(" | ")}`,
+      );
     })();
   }
 

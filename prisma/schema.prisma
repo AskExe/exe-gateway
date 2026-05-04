@@ -1,0 +1,184 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["gateway", "billing"]
+}
+
+model GatewayAccount {
+  id          Int      @id @default(autoincrement())
+  platform    String
+  accountName String   @map("account_name")
+  platformId  String?  @map("platform_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  threads  GatewayThread[]
+  messages GatewayMessage[]
+
+  @@unique([platform, accountName])
+  @@map("accounts")
+  @@schema("gateway")
+}
+
+model GatewayContact {
+  id          Int      @id @default(autoincrement())
+  platform    String
+  platformJid String   @map("platform_jid")
+  phone       String?
+  displayName String?  @map("display_name")
+  pushName    String?  @map("push_name")
+  crmPersonId String?  @map("crm_person_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  threads GatewayThread[]
+
+  @@unique([platform, platformJid])
+  @@map("contacts")
+  @@schema("gateway")
+  @@index([phone])
+  @@index([crmPersonId])
+}
+
+model GatewayThread {
+  id           Int       @id @default(autoincrement())
+  accountId    Int       @map("account_id")
+  contactId    Int       @map("contact_id")
+  groupJid     String?   @map("group_jid")
+  groupName    String?   @map("group_name")
+  lastMessage  DateTime? @map("last_message")
+  messageCount Int       @default(0) @map("message_count")
+
+  account  GatewayAccount @relation(fields: [accountId], references: [id])
+  contact  GatewayContact @relation(fields: [contactId], references: [id])
+  messages GatewayMessage[]
+
+  @@unique([accountId, contactId, groupJid])
+  @@map("threads")
+  @@schema("gateway")
+}
+
+model GatewayMessage {
+  id           Int      @id @default(autoincrement())
+  threadId     Int      @map("thread_id")
+  accountId    Int      @map("account_id")
+  messageId    String   @map("message_id")
+  fromJid      String   @map("from_jid")
+  fromMe       Boolean  @default(false) @map("from_me")
+  text         String?
+  mediaType    String?  @map("media_type")
+  mediaUrl     String?  @map("media_url")
+  timestamp    DateTime
+  isHistorical Boolean  @default(false) @map("is_historical")
+  rawPayload   Json?    @map("raw_payload")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  thread  GatewayThread  @relation(fields: [threadId], references: [id])
+  account GatewayAccount @relation(fields: [accountId], references: [id])
+
+  @@map("messages")
+  @@schema("gateway")
+  @@index([threadId, timestamp])
+  @@index([accountId, messageId])
+}
+
+model GatewayCustomer {
+  id               String   @id @default(uuid())
+  name             String?
+  assignedEmployee String?  @map("assigned_employee")
+  firstSeenAt      DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt       DateTime @default(now()) @map("last_seen_at")
+  interactionCount Int      @default(0) @map("interaction_count")
+
+  identities GatewayCustomerIdentity[]
+  sessions   GatewaySession[]
+
+  @@map("customers")
+  @@schema("gateway")
+}
+
+model GatewayCustomerIdentity {
+  id         Int             @id @default(autoincrement())
+  customerId String          @map("customer_id")
+  platform   String
+  senderId   String          @map("sender_id")
+  customer   GatewayCustomer @relation(fields: [customerId], references: [id])
+
+  @@unique([platform, senderId])
+  @@map("customer_identities")
+  @@schema("gateway")
+}
+
+model GatewaySession {
+  id                String           @id @default(uuid())
+  customerId        String?          @map("customer_id")
+  botId             String           @map("bot_id")
+  platform          String
+  messages          Json             @default("[]")
+  startedAt         DateTime         @default(now()) @map("started_at")
+  lastMessageAt     DateTime         @default(now()) @map("last_message_at")
+  messageCount      Int              @default(0) @map("message_count")
+  totalInputTokens  Int              @default(0) @map("total_input_tokens")
+  totalOutputTokens Int              @default(0) @map("total_output_tokens")
+  status            String           @default("active")
+  customer          GatewayCustomer? @relation(fields: [customerId], references: [id])
+
+  @@map("sessions")
+  @@schema("gateway")
+  @@index([customerId, botId])
+  @@index([status])
+}
+
+model BillingCustomer {
+  id               String   @id @default(uuid())
+  authUserId       String   @unique @map("auth_user_id")
+  name             String
+  email            String
+  stripeCustomerId String?  @unique @map("stripe_customer_id")
+  plan             String   @default("free")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  apiKeys   BillingApiKey[]
+  usageLogs BillingUsageLog[]
+
+  @@map("customers")
+  @@schema("billing")
+}
+
+model BillingApiKey {
+  id           Int             @id @default(autoincrement())
+  keyPrefix    String          @map("key_prefix")
+  keyHash      String          @unique @map("key_hash")
+  customerId   String          @map("customer_id")
+  rateLimitRpm Int             @default(60) @map("rate_limit_rpm")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  revokedAt    DateTime?       @map("revoked_at")
+  lastUsedAt   DateTime?       @map("last_used_at")
+  customer     BillingCustomer @relation(fields: [customerId], references: [id])
+
+  @@map("api_keys")
+  @@schema("billing")
+  @@index([keyHash])
+}
+
+model BillingUsageLog {
+  id           Int             @id @default(autoincrement())
+  customerId   String          @map("customer_id")
+  model        String
+  inputTokens  Int             @map("input_tokens")
+  outputTokens Int             @map("output_tokens")
+  costUsd      Decimal         @map("cost_usd") @db.Decimal(10, 6)
+  marginUsd    Decimal         @map("margin_usd") @db.Decimal(10, 6)
+  provider     String
+  latencyMs    Int             @map("latency_ms")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  customer     BillingCustomer @relation(fields: [customerId], references: [id])
+
+  @@map("usage_logs")
+  @@schema("billing")
+  @@index([customerId, createdAt])
+  @@index([createdAt])
+}

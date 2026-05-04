@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import crypto from "node:crypto";
 import { WebhookServer } from "../src/webhook-server.js";
 
 const TEST_PORT = 19876; // unlikely to collide
@@ -8,7 +9,7 @@ const TEST_HOST = "127.0.0.1"; // Bind to localhost in tests (same as the safer 
 async function req(
   method: string,
   path: string,
-  options?: { body?: unknown; headers?: Record<string, string> },
+  options?: { body?: unknown; rawBody?: string; headers?: Record<string, string> },
 ): Promise<{ status: number; data: Record<string, unknown> }> {
   const url = `http://127.0.0.1:${TEST_PORT}${path}`;
   const res = await fetch(url, {
@@ -18,7 +19,9 @@ async function req(
       Connection: "close",
       ...(options?.headers ?? {}),
     },
-    body: options?.body ? JSON.stringify(options.body) : undefined,
+    body:
+      options?.rawBody ??
+      (options?.body ? JSON.stringify(options.body) : undefined),
   });
   const text = await res.text();
   let data: Record<string, unknown> = {};
@@ -69,13 +72,13 @@ describe("WebhookServer", () => {
     it("routes payload to the correct platform handler", async () => {
       const received: unknown[] = [];
       server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
-      server.onPlatform("whatsapp", async (body) => {
+      server.onPlatform("test", async (body) => {
         received.push(body);
       });
       await server.start();
 
       const payload = { object: "whatsapp_business_account", entry: [] };
-      const { status, data } = await req("POST", "/webhook/whatsapp", {
+      const { status, data } = await req("POST", "/webhook/test", {
         body: payload,
       });
 
@@ -116,12 +119,12 @@ describe("WebhookServer", () => {
       const emailReceived: unknown[] = [];
 
       server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
-      server.onPlatform("whatsapp", async (body) => waReceived.push(body));
+      server.onPlatform("test", async (body) => waReceived.push(body));
       server.onPlatform("email", async (body) => emailReceived.push(body));
       await server.start();
 
       await req("POST", "/webhook/email", { body: { from: "alice@test.com" } });
-      await req("POST", "/webhook/whatsapp", { body: { object: "wa" } });
+      await req("POST", "/webhook/test", { body: { object: "wa" } });
 
       await new Promise((r) => setTimeout(r, 50));
 
@@ -143,10 +146,10 @@ describe("WebhookServer", () => {
         host: TEST_HOST,
         authToken: "secret-123",
       });
-      server.onPlatform("whatsapp", async () => {});
+      server.onPlatform("test", async () => {});
       await server.start();
 
-      const { status, data } = await req("POST", "/webhook/whatsapp", {
+      const { status, data } = await req("POST", "/webhook/test", {
         body: { test: true },
       });
 
@@ -160,10 +163,10 @@ describe("WebhookServer", () => {
         host: TEST_HOST,
         authToken: "secret-123",
       });
-      server.onPlatform("whatsapp", async () => {});
+      server.onPlatform("test", async () => {});
       await server.start();
 
-      const { status } = await req("POST", "/webhook/whatsapp", {
+      const { status } = await req("POST", "/webhook/test", {
         body: { test: true },
         headers: { Authorization: "Bearer wrong-token" },
       });
@@ -178,10 +181,10 @@ describe("WebhookServer", () => {
         host: TEST_HOST,
         authToken: "secret-123",
       });
-      server.onPlatform("whatsapp", async (body) => received.push(body));
+      server.onPlatform("test", async (body) => received.push(body));
       await server.start();
 
-      const { status, data } = await req("POST", "/webhook/whatsapp", {
+      const { status, data } = await req("POST", "/webhook/test", {
         body: { test: true },
         headers: { Authorization: "Bearer secret-123" },
       });
@@ -196,16 +199,300 @@ describe("WebhookServer", () => {
     it("does not require auth when no token configured", async () => {
       const received: unknown[] = [];
       server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
-      server.onPlatform("whatsapp", async (body) => received.push(body));
+      server.onPlatform("test", async (body) => received.push(body));
       await server.start();
 
-      const { status } = await req("POST", "/webhook/whatsapp", {
+      const { status } = await req("POST", "/webhook/test", {
         body: { ok: true },
       });
 
       expect(status).toBe(200);
       await new Promise((r) => setTimeout(r, 50));
       expect(received).toHaveLength(1);
+    });
+
+    it("accepts hashed admin auth tokens", async () => {
+      const received: unknown[] = [];
+      server = new WebhookServer({
+        port: TEST_PORT,
+        host: TEST_HOST,
+        authTokenHash: crypto.createHash("sha256").update("secret-123").digest("hex"),
+      });
+      server.onPlatform("test", async (body) => received.push(body));
+      await server.start();
+
+      const { status } = await req("POST", "/webhook/test", {
+        body: { ok: true },
+        headers: { Authorization: "Bearer secret-123" },
+      });
+
+      expect(status).toBe(200);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(received).toHaveLength(1);
+    });
+  });
+
+  describe("provider webhook signatures", () => {
+    it("rejects unsigned WhatsApp webhooks when app secret is configured", async () => {
+      server = new WebhookServer({
+        port: TEST_PORT,
+        host: TEST_HOST,
+        webhookSignatures: { whatsappAppSecrets: ["wa-secret"] },
+      });
+      server.onPlatform("whatsapp", async () => {});
+      await server.start();
+
+      const { status, data } = await req("POST", "/webhook/whatsapp", {
+        body: { object: "wa" },
+      });
+
+      expect(status).toBe(401);
+      expect(data.error).toBe("Missing WhatsApp webhook signature");
+    });
+
+    it("accepts valid WhatsApp webhook signatures", async () => {
+      const received: unknown[] = [];
+      const rawBody = JSON.stringify({ object: "wa" });
+      const signature = crypto.createHmac("sha256", "wa-secret").update(rawBody).digest("hex");
+
+      server = new WebhookServer({
+        port: TEST_PORT,
+        host: TEST_HOST,
+        webhookSignatures: { whatsappAppSecrets: ["wa-secret"] },
+      });
+      server.onPlatform("whatsapp", async (body) => received.push(body));
+      await server.start();
+
+      const { status } = await req("POST", "/webhook/whatsapp", {
+        rawBody,
+        headers: { "X-Hub-Signature-256": `sha256=${signature}` },
+      });
+
+      expect(status).toBe(200);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(received).toHaveLength(1);
+    });
+
+    it("accepts valid Telegram webhook secret tokens", async () => {
+      const received: unknown[] = [];
+      server = new WebhookServer({
+        port: TEST_PORT,
+        host: TEST_HOST,
+        webhookSignatures: { telegramSecretTokens: ["tg-secret"] },
+      });
+      server.onPlatform("telegram", async (body) => received.push(body));
+      await server.start();
+
+      const { status } = await req("POST", "/webhook/telegram", {
+        body: { update_id: 1, message: { chat: { id: 1 }, date: 1, message_id: 1 } },
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "tg-secret" },
+      });
+
+      expect(status).toBe(200);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(received).toHaveLength(1);
+    });
+
+    it("rejects invalid Telegram webhook secret tokens", async () => {
+      server = new WebhookServer({
+        port: TEST_PORT,
+        host: TEST_HOST,
+        webhookSignatures: { telegramSecretTokens: ["tg-secret"] },
+      });
+      server.onPlatform("telegram", async () => {});
+      await server.start();
+
+      const { status, data } = await req("POST", "/webhook/telegram", {
+        body: { update_id: 1 },
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "wrong" },
+      });
+
+      expect(status).toBe(401);
+      expect(data.error).toBe("Invalid Telegram webhook secret token");
+    });
+
+    it("accepts valid Discord Ed25519 signatures", async () => {
+      const received: unknown[] = [];
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+      const publicKeyHex = publicKey.export({ format: "der", type: "spki" })
+        .subarray(-32)
+        .toString("hex");
+      const rawBody = JSON.stringify({
+        id: "1",
+        author: { id: "u1", username: "dev", bot: false },
+        channel_id: "c1",
+        content: "hello",
+      });
+      const timestamp = String(Date.now());
+      const payload = Buffer.concat([Buffer.from(timestamp, "utf-8"), Buffer.from(rawBody, "utf-8")]);
+      const signature = crypto.sign(null, payload, privateKey).toString("hex");
+
+      server = new WebhookServer({
+        port: TEST_PORT,
+        host: TEST_HOST,
+        webhookSignatures: { discordPublicKeys: [publicKeyHex] },
+      });
+      server.onPlatform("discord", async (body) => received.push(body));
+      await server.start();
+
+      const { status } = await req("POST", "/webhook/discord", {
+        rawBody,
+        headers: {
+          "X-Signature-Ed25519": signature,
+          "X-Signature-Timestamp": timestamp,
+        },
+      });
+
+      expect(status).toBe(200);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(received).toHaveLength(1);
+    });
+
+    it("rejects invalid Discord Ed25519 signatures", async () => {
+      const { publicKey } = crypto.generateKeyPairSync("ed25519");
+      const publicKeyHex = publicKey.export({ format: "der", type: "spki" })
+        .subarray(-32)
+        .toString("hex");
+
+      server = new WebhookServer({
+        port: TEST_PORT,
+        host: TEST_HOST,
+        webhookSignatures: { discordPublicKeys: [publicKeyHex] },
+      });
+      server.onPlatform("discord", async () => {});
+      await server.start();
+
+      const { status, data } = await req("POST", "/webhook/discord", {
+        rawBody: JSON.stringify({
+          id: "1",
+          author: { id: "u1", username: "dev", bot: false },
+          channel_id: "c1",
+          content: "hello",
+        }),
+        headers: {
+          "X-Signature-Ed25519": "00".repeat(64),
+          "X-Signature-Timestamp": String(Date.now()),
+        },
+      });
+
+      expect(status).toBe(401);
+      expect(data.error).toBe("Invalid Discord webhook signature");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Outbound API
+  // -----------------------------------------------------------------------
+
+  describe("POST /api/send", () => {
+    it("requires an explicit account when multiple accounts share a platform", async () => {
+      const sendSales = vi.fn().mockResolvedValue(undefined);
+      const sendSupport = vi.fn().mockResolvedValue(undefined);
+
+      server = new WebhookServer({
+        port: TEST_PORT,
+        host: TEST_HOST,
+        authToken: "secret-123",
+      });
+      server.registerAdapter("whatsapp", {
+        platform: "whatsapp",
+        accountName: "sales",
+        sendText: sendSales,
+      }, "sales");
+      server.registerAdapter("whatsapp", {
+        platform: "whatsapp",
+        accountName: "support",
+        sendText: sendSupport,
+      }, "support");
+      await server.start();
+
+      const { status, data } = await req("POST", "/api/send", {
+        body: { platform: "whatsapp", to: "+15551234567", text: "hello" },
+        headers: { Authorization: "Bearer secret-123" },
+      });
+
+      expect(status).toBe(400);
+      expect(String(data.error)).toContain("Multiple whatsapp accounts");
+      expect(sendSales).not.toHaveBeenCalled();
+      expect(sendSupport).not.toHaveBeenCalled();
+    });
+
+    it("routes sends to the requested account and still applies rate limiting when urgent=true", async () => {
+      const sendSales = vi.fn().mockResolvedValue(undefined);
+      const sendSupport = vi.fn().mockResolvedValue(undefined);
+
+      server = new WebhookServer({
+        port: TEST_PORT,
+        host: TEST_HOST,
+        authToken: "secret-123",
+      });
+      server.registerAdapter("whatsapp", {
+        platform: "whatsapp",
+        accountName: "sales",
+        sendText: sendSales,
+      }, "sales");
+      server.registerAdapter("whatsapp", {
+        platform: "whatsapp",
+        accountName: "support",
+        sendText: sendSupport,
+      }, "support");
+      await server.start();
+
+      const { status, data } = await req("POST", "/api/send", {
+        body: {
+          platform: "whatsapp",
+          account: "support",
+          to: "+15551234567",
+          text: "hello",
+          urgent: true,
+        },
+        headers: { Authorization: "Bearer secret-123" },
+      });
+
+      expect(status).toBe(200);
+      expect(data.account).toBe("support");
+      expect(data.rateLimited).toBe(true);
+      expect(sendSales).not.toHaveBeenCalled();
+      expect(sendSupport).toHaveBeenCalledTimes(1);
+      expect(sendSupport).toHaveBeenCalledWith("15551234567@s.whatsapp.net", "hello");
+    });
+
+    it("routes accounts case-insensitively", async () => {
+      const sendSales = vi.fn().mockResolvedValue(undefined);
+      const sendSupport = vi.fn().mockResolvedValue(undefined);
+
+      server = new WebhookServer({
+        port: TEST_PORT,
+        host: TEST_HOST,
+        authToken: "secret-123",
+      });
+      server.registerAdapter("whatsapp", {
+        platform: "whatsapp",
+        accountName: "Sales",
+        sendText: sendSales,
+      }, "Sales");
+      server.registerAdapter("whatsapp", {
+        platform: "whatsapp",
+        accountName: "Support",
+        sendText: sendSupport,
+      }, "Support");
+      await server.start();
+
+      const { status, data } = await req("POST", "/api/send", {
+        body: {
+          platform: "whatsapp",
+          account: "support",
+          to: "+15551234567",
+          text: "hello",
+        },
+        headers: { Authorization: "Bearer secret-123" },
+      });
+
+      expect(status).toBe(200);
+      expect(data.account).toBe("support");
+      expect(sendSales).not.toHaveBeenCalled();
+      expect(sendSupport).toHaveBeenCalledTimes(1);
+      expect(sendSupport).toHaveBeenCalledWith("15551234567@s.whatsapp.net", "hello");
     });
   });
 
@@ -216,11 +503,11 @@ describe("WebhookServer", () => {
   describe("malformed payloads", () => {
     it("returns 200 on invalid JSON (prevents retries)", async () => {
       server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
-      server.onPlatform("whatsapp", async () => {});
+      server.onPlatform("test", async () => {});
       await server.start();
 
       const res = await fetch(
-        `http://127.0.0.1:${TEST_PORT}/webhook/whatsapp`,
+        `http://127.0.0.1:${TEST_PORT}/webhook/test`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json", Connection: "close" },
@@ -235,11 +522,11 @@ describe("WebhookServer", () => {
 
     it("returns 200 on empty body", async () => {
       server = new WebhookServer({ port: TEST_PORT, host: TEST_HOST });
-      server.onPlatform("whatsapp", async () => {});
+      server.onPlatform("test", async () => {});
       await server.start();
 
       const res = await fetch(
-        `http://127.0.0.1:${TEST_PORT}/webhook/whatsapp`,
+        `http://127.0.0.1:${TEST_PORT}/webhook/test`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
