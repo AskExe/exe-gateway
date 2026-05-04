@@ -7,7 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { createConnection } from "node:net";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import type {
@@ -53,7 +53,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   async connect(config: PlatformConfig): Promise<void> {
     this.authDir = config.credentials.authDir ?? AUTH_DIR;
-    mkdirSync(this.authDir, { recursive: true });
+    mkdirSync(this.authDir, { recursive: true, mode: 0o700 });
+    chmodSync(this.authDir, 0o700);
 
     // Resolve proxy: per-account → global env → none
     this.proxyUrl = config.credentials.proxy || GLOBAL_SOCKS_PROXY_URL;
@@ -82,7 +83,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
       const agent = new SocksProxyAgent(this.proxyUrl);
       socketOptions.agent = agent;
       socketOptions.fetchAgent = agent;
-      console.log(`[whatsapp:${this.accountName}] Routing through SOCKS proxy: ${this.proxyUrl}`);
+      console.log(
+        `[whatsapp:${this.accountName}] Routing through SOCKS proxy: ${sanitizeProxyUrl(this.proxyUrl)}`,
+      );
     }
 
     const sock = makeWASocket(socketOptions as any);
@@ -641,5 +644,14 @@ export class WhatsAppAdapter implements PlatformAdapter {
     }
 
     return media.length > 0 ? media : undefined;
+  }
+}
+
+function sanitizeProxyUrl(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    return `${url.protocol}//${url.hostname}${url.port ? `:${url.port}` : ""}`;
+  } catch {
+    return "[invalid proxy URL]";
   }
 }

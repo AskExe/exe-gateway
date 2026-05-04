@@ -87,7 +87,7 @@ Your personality:
 - If you don't know something, say so and suggest who might
 
 Your tools:
-- ask_team_memory: Query any employee's memories (yoshi, tom, mari, exe)
+- ask_team_memory: Query any employee's memories by role or name
 - recall_my_memory: Search your own past conversations with the founder
 - list_tasks: See what's in progress across the org
 - get_session_context: Get context from a specific session
@@ -329,7 +329,7 @@ export function buildExecAssistantTools(): ToolDefinition[] {
         properties: {
           team_member: {
             type: "string",
-            description: "Name of the team member (e.g., 'yoshi', 'mari', 'exe')",
+            description: "Name or role of the team member (e.g., 'cto', 'cmo', or a custom employee name)",
           },
           query: { type: "string", description: "What to search for" },
           project_name: {
@@ -509,7 +509,7 @@ export function buildExecAssistantTools(): ToolDefinition[] {
     },
     {
       name: "close_task",
-      description: "Reviewer-only: finalize a task after review. Only exe/ea can use this.",
+      description: "Reviewer-only: finalize a task after review.",
       input_schema: {
         type: "object",
         properties: {

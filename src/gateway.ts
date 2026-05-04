@@ -33,6 +33,7 @@ import type { FailoverCascade } from "./failover.js";
 import type { CustomerStore } from "./customer-store.js";
 import { buildDegradationMessage } from "./reliability.js";
 import { initCRMBridge } from "./crm-bridge.js";
+import { OutboundLimiter } from "./outbound-limiter.js";
 
 export interface GatewayOptions {
   config: GatewayConfig;
@@ -77,6 +78,7 @@ export interface AutoReplyConfig {
 export class Gateway {
   private config: GatewayConfig;
   private adapters = new Map<string, PlatformAdapter>();
+  private outboundLimiters = new Map<string, OutboundLimiter>();
   private platformConfigs: Map<string, PlatformConfig>;
   private botRegistry: BotRegistry;
   private rateLimiter?: RateLimiter;
@@ -133,6 +135,10 @@ export class Gateway {
   registerAdapter(adapter: PlatformAdapter): void {
     const key = `${adapter.platform}:${adapter.accountName ?? "default"}`;
     this.adapters.set(key, adapter);
+    this.outboundLimiters.set(
+      key,
+      new OutboundLimiter(adapter.platform, getOutboundLimiterTestOverrides()),
+    );
     adapter.onMessage((msg) => {
       // Stamp accountId from the adapter that produced this message
       msg.accountId = msg.accountId ?? adapter.accountName ?? "default";
@@ -228,7 +234,7 @@ export class Gateway {
       if (!limitResult.allowed) {
         const adapter = this.resolveAdapter(msg);
         if (adapter) {
-          await adapter.sendText(msg.channelId, limitResult.reason ?? "Please slow down.");
+          await this.sendOutboundMessage(msg, adapter, limitResult.reason ?? "Please slow down.");
         }
         return;
       }
@@ -261,6 +267,7 @@ export class Gateway {
     getHooks().onEvent?.({
       type: "gateway_message",
       platform: msg.platform,
+      accountId: msg.accountId,
       senderId: msg.senderId,
       botId: route.employee,
       timestamp: new Date().toISOString(),
@@ -280,9 +287,7 @@ export class Gateway {
           console.log(`[gateway] Auto-reply "${replyMsg}" to ${msg.senderId} in ${delaySec.toFixed(1)}s`);
           setTimeout(async () => {
             try {
-              await adapter.sendTyping(msg.channelId);
-              await new Promise(r => setTimeout(r, 500 + Math.random() * 1500));
-              await adapter.sendText(msg.channelId, replyMsg);
+              await this.sendOutboundMessage(msg, adapter, replyMsg);
               this.autoReplyLog.set(msg.senderId, Date.now());
               this.autoReplyCount++;
             } catch (err) {
@@ -296,9 +301,6 @@ export class Gateway {
 
     const adapter = this.resolveAdapter(msg);
     if (!adapter) return;
-
-    // 5. Send typing indicator
-    await adapter.sendTyping(msg.channelId);
 
     // 6. Session persistence — load/resume
     const session = this.sessionStore?.getOrCreate(
@@ -346,7 +348,7 @@ export class Gateway {
       this.alertMonitor?.recordEvent(latencyMs, true);
 
       // 12. Send response
-      await adapter.sendText(msg.channelId, response, {
+      await this.sendOutboundMessage(msg, adapter, response, {
         replyToMessageId: msg.messageId,
       });
 
@@ -386,8 +388,9 @@ export class Gateway {
       );
 
       console.error(`[gateway] Error processing message:`, err);
-      await adapter.sendText(
-        msg.channelId,
+      await this.sendOutboundMessage(
+        msg,
+        adapter,
         buildDegradationMessage(),
       );
     }
@@ -397,6 +400,31 @@ export class Gateway {
   private resolveAdapter(msg: NormalizedMessage): PlatformAdapter | undefined {
     const key = `${msg.platform}:${msg.accountId ?? "default"}`;
     return this.adapters.get(key) ?? this.adapters.get(`${msg.platform}:default`);
+  }
+
+  private getOutboundLimiter(msg: NormalizedMessage): OutboundLimiter {
+    const key = `${msg.platform}:${msg.accountId ?? "default"}`;
+    const existing = this.outboundLimiters.get(key) ?? this.outboundLimiters.get(`${msg.platform}:default`);
+    if (existing) return existing;
+
+    const fallback = new OutboundLimiter(msg.platform, getOutboundLimiterTestOverrides());
+    this.outboundLimiters.set(key, fallback);
+    return fallback;
+  }
+
+  private async sendOutboundMessage(
+    msg: NormalizedMessage,
+    adapter: PlatformAdapter,
+    text: string,
+    options?: { replyToMessageId?: string },
+  ): Promise<void> {
+    const limiter = this.getOutboundLimiter(msg);
+    await limiter.send(
+      msg.channelId,
+      text,
+      () => adapter.sendText(msg.channelId, text, options),
+      adapter.sendTyping ? () => adapter.sendTyping(msg.channelId) : undefined,
+    );
   }
 
   /**
@@ -498,4 +526,17 @@ export class Gateway {
       alerts: this.alertMonitor?.getActiveAlerts().length,
     };
   }
+}
+
+function getOutboundLimiterTestOverrides() {
+  if (process.env.NODE_ENV !== "test") return undefined;
+  return {
+    minDelayPerRecipientSec: 0,
+    maxDelayPerRecipientSec: 0,
+    minGlobalDelaySec: 0,
+    maxGlobalDelaySec: 0,
+    typingCps: 1_000_000,
+    minTypingSec: 0,
+    maxTypingSec: 0,
+  };
 }

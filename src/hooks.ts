@@ -12,6 +12,7 @@ import type { NormalizedMessage, GatewayPlatform } from "./types.js";
 export interface GatewayEvent {
   type: string;
   platform: string;
+  accountId?: string;
   senderId: string;
   botId: string;
   timestamp: string;

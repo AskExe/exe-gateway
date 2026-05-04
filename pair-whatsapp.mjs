@@ -9,7 +9,7 @@
  * Rate limited: max 3 attempts, 30s cooldown between attempts.
  */
 
-import { existsSync, readFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, chmodSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { SocksProxyAgent } from "socks-proxy-agent";
@@ -25,6 +25,7 @@ if (args.length < 2) {
 }
 
 const [accountName, rawPhone] = args;
+const normalizedAccountName = normalizeAccountName(accountName);
 
 // Strip non-numeric except leading +
 const phoneNumber = rawPhone.replace(/[^0-9]/g, "");
@@ -47,9 +48,9 @@ if (existsSync(configPath)) {
   try {
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     const accounts = config?.adapters?.whatsapp?.accounts ?? [];
-    const match = accounts.find((a) => a.name === accountName);
-    if (match?.authDir) {
-      authDir = match.authDir;
+    const match = accounts.find((a) => normalizeAccountName(a.name) === normalizedAccountName);
+    if (match) {
+      authDir = match.authDir || join(stateDir, ".auth", `whatsapp-${match.name}`);
     }
     proxyUrl = match?.proxy || config?.adapters?.whatsapp?.proxy || proxyUrl;
   } catch {
@@ -57,13 +58,14 @@ if (existsSync(configPath)) {
   }
 }
 
-mkdirSync(authDir, { recursive: true });
+mkdirSync(authDir, { recursive: true, mode: 0o700 });
+chmodSync(authDir, 0o700);
 
 console.log(`[pair] Account: ${accountName}`);
 console.log(`[pair] Phone: +${phoneNumber}`);
 console.log(`[pair] Auth dir: ${authDir}`);
 if (proxyUrl) {
-  console.log(`[pair] Proxy: ${proxyUrl}`);
+  console.log(`[pair] Proxy: ${sanitizeProxyUrl(proxyUrl)}`);
 }
 console.log("");
 
@@ -166,3 +168,16 @@ async function pair() {
 }
 
 await pair();
+
+function sanitizeProxyUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    return `${url.protocol}//${url.hostname}${url.port ? `:${url.port}` : ""}`;
+  } catch {
+    return "[invalid proxy URL]";
+  }
+}
+
+function normalizeAccountName(value) {
+  return String(value ?? "").trim().toLowerCase();
+}

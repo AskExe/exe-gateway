@@ -20,6 +20,8 @@ import { logUsage } from "./metering.js";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com";
 const PROXY_BODY_LIMIT = 4 * 1_048_576; // 4 MB (prompts can include base64 images)
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const customerRequestWindows = new Map<string, number[]>();
 
 export interface LLMProxyConfig {
   /** Our master Anthropic API key (we pay Anthropic, customer pays us) */
@@ -84,6 +86,17 @@ export async function handleProxyRequest(
   const isStreaming = body.stream === true;
   const model = (body.model as string) ?? "unknown";
   const start = Date.now();
+  const rateLimit = enforceCustomerRateLimit(customer.id, customer.rateLimitRpm);
+  if (!rateLimit.allowed) {
+    sendProxyError(
+      res,
+      429,
+      "rate_limit_error",
+      `Rate limit exceeded. Try again in ${rateLimit.retryAfterSec}s.`,
+      { "Retry-After": String(rateLimit.retryAfterSec) },
+    );
+    return;
+  }
 
   // 4. Forward to Anthropic — same body, swap API key
   const anthropicVersion =
@@ -317,10 +330,12 @@ function sendProxyError(
   status: number,
   type: string,
   message: string,
+  extraHeaders?: Record<string, string>,
 ): void {
   res.writeHead(status, {
     "Content-Type": "application/json",
     "Connection": "close",
+    ...(extraHeaders ?? {}),
   });
   res.end(
     JSON.stringify({
@@ -328,4 +343,34 @@ function sendProxyError(
       error: { type, message },
     }),
   );
+}
+
+function enforceCustomerRateLimit(
+  customerId: string,
+  rateLimitRpm: number,
+): { allowed: true } | { allowed: false; retryAfterSec: number } {
+  if (rateLimitRpm <= 0) {
+    return { allowed: true };
+  }
+
+  const now = Date.now();
+  const cutoff = now - RATE_LIMIT_WINDOW_MS;
+  const window = customerRequestWindows.get(customerId) ?? [];
+
+  while (window.length > 0 && window[0]! <= cutoff) {
+    window.shift();
+  }
+
+  if (window.length >= rateLimitRpm) {
+    const retryAfterMs = Math.max(1_000, window[0]! + RATE_LIMIT_WINDOW_MS - now);
+    customerRequestWindows.set(customerId, window);
+    return {
+      allowed: false,
+      retryAfterSec: Math.max(1, Math.ceil(retryAfterMs / 1000)),
+    };
+  }
+
+  window.push(now);
+  customerRequestWindows.set(customerId, window);
+  return { allowed: true };
 }
